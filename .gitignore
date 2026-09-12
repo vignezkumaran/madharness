@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+packages/*/dist/
+*.tsbuildinfo
+
+# Environment & credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Archives & binaries
+*.zip
+*.tar.gz
+
+# Cache & Scratch
+.cache/
+scratch/
+tmp/
