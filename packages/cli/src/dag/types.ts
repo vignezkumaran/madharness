@@ -1,10 +1,12 @@
-// ─── DAG Types ──────────────────────────────────────────────────────────────
+// ─── Mesh Bus Types ─────────────────────────────────────────────────────────
+// MAD Mesh: agents publish/subscribe to a shared blackboard instead of a
+// rigid chain. `context` passed to executors IS the bus (input + prior posts).
 
 /** Node execution states */
 export type NodeState = 'PENDING' | 'RUNNING' | 'PASSED' | 'FAILED' | 'SKIPPED';
 
-/** Agent role names */
-export type AgentRole = 'architect' | 'coder' | 'sandbox' | 'debugger';
+/** Mesh peer roles (distill publishes, others converse) */
+export type AgentRole = 'distill' | 'architect' | 'coder' | 'verifier' | 'sandbox' | 'debugger';
 
 /** Result from an agent execution */
 export interface AgentResult {
@@ -41,7 +43,7 @@ export type DAGExecutionState = 'IDLE' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'H
 
 /** Event emitted during DAG execution */
 export interface DAGEvent {
-  type: 'node_start' | 'node_complete' | 'node_failed' | 'node_retry' | 'dag_complete' | 'dag_failed';
+  type: 'node_start' | 'node_complete' | 'node_failed' | 'node_retry' | 'dag_complete' | 'dag_failed' | 'bus_post';
   role?: AgentRole;
   data?: AgentResult;
   timestamp: Date;

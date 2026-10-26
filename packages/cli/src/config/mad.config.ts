@@ -21,36 +21,36 @@ export interface MADConfig {
 }
 
 export const defaultConfig: MADConfig = {
-  version: '0.1.0',
+  version: '0.3.0',
   pipeline: {
     nodes: [
       {
-        role: 'architect' as AgentRole,
-        displayName: 'Architect',
-        maxRetries: 3,
-        timeoutMs: 30000,
+        role: 'distill' as AgentRole,
+        displayName: '◈ Distill · Contract Engine',
+        maxRetries: 1,
+        timeoutMs: 15000,
         dependsOn: [],
       },
       {
+        role: 'architect' as AgentRole,
+        displayName: '⬡ Architect · Mesh Peer',
+        maxRetries: 3,
+        timeoutMs: 30000,
+        dependsOn: ['distill' as AgentRole],
+      },
+      {
         role: 'coder' as AgentRole,
-        displayName: 'Coder',
+        displayName: '⬣ Coder · Mesh Peer',
         maxRetries: 3,
         timeoutMs: 60000,
         dependsOn: ['architect' as AgentRole],
       },
       {
-        role: 'sandbox' as AgentRole,
-        displayName: 'Sandbox',
-        maxRetries: 3,
-        timeoutMs: 45000,
-        dependsOn: ['coder' as AgentRole],
-      },
-      {
-        role: 'debugger' as AgentRole,
-        displayName: 'Debugger',
+        role: 'verifier' as AgentRole,
+        displayName: '⬔ Verifier · Mesh Peer',
         maxRetries: 3,
         timeoutMs: 30000,
-        dependsOn: ['sandbox' as AgentRole],
+        dependsOn: ['coder' as AgentRole],
       },
     ],
     circuitBreaker: {
@@ -64,7 +64,7 @@ export const defaultConfig: MADConfig = {
     keepConstants: true,
   },
   providers: {
-    default: 'claude',
-    fallbackOrder: ['claude', 'gemini', 'groq', 'codex', 'ollama'],
+    default: 'groq',
+    fallbackOrder: ['groq', 'gemini', 'codex', 'claude', 'ollama'],
   },
 };

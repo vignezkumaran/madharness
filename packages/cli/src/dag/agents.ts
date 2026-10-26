@@ -44,17 +44,23 @@ function pickRandom<T>(arr: T[]): T {
 
 /**
  * Mock agent executor for offline or simulated test runs.
+ * Simulates Mesh Bus chatter: each peer reads context.bus and appends.
  */
 export async function mockAgentExecutor(
   role: AgentRole,
   input: string,
-  _context: Record<string, string>
+  context: Record<string, string>
 ): Promise<AgentResult> {
   let delay: number;
   let passProbability: number;
   let output: string;
 
   switch (role) {
+    case 'distill':
+      delay = randomDelay(300, 700);
+      passProbability = 1.0;
+      output = `BUS◈ published contract (${Math.min(input.length, 2000)} chars in → ~7% kept): signatures + imports + types only. Peers subscribe from here — nobody re-ingests raw.`;
+      break;
     case 'architect':
       delay = randomDelay(800, 1500);
       passProbability = 1.0;
@@ -69,6 +75,11 @@ export async function mockAgentExecutor(
       delay = randomDelay(500, 1200);
       passProbability = 0.85;
       output = pickRandom(SANDBOX_OUTPUTS);
+      break;
+    case 'verifier':
+      delay = randomDelay(600, 1000);
+      passProbability = 1.0;
+      output = 'BUS◈ verifier converged: contract adherence 100% · 2 handoff fixes applied · 0 raw re-ingests · mesh consensus reached.';
       break;
     case 'debugger':
       delay = randomDelay(600, 1000);
@@ -122,24 +133,34 @@ export async function realAgentExecutor(
   const cleanSandbox = (context['sandbox'] || 'All basic checks passed').slice(0, 1500);
 
   switch (role) {
+    case 'distill':
+      systemPrompt = 'You are the Distiller peer in the MAD mesh. Compress input to signatures/imports/types only. Output ONLY the contract.';
+      prompt = `Distill this to a minimal interface contract:\n\n${cleanInput}`;
+      break;
+
     case 'architect':
-      systemPrompt = 'You are the Lead Architect in the MAD multi-agent harness. Analyze the provided AST-pruned interface contract and formulate a concise, structured implementation plan with component breakdown.';
-      prompt = `Here is the pruned interface contract:\n\n${cleanInput}\n\nProvide an architectural plan, module breakdown, and implementation steps (keep concise and actionable).`;
+      systemPrompt = 'You are the Architect peer in the MAD mesh. Read the distilled contract from the bus, post a plan + open questions for coder/verifier to critique.';
+      prompt = `Here is the distilled contract from the bus:\n\n${cleanInput}\n\nPost plan + 3 open questions (concise, no raw re-ingest).`;
       break;
 
     case 'coder':
-      systemPrompt = 'You are the Expert Coder in the MAD multi-agent harness. Implement clean, robust, type-annotated code adhering to the architecture plan.';
-      prompt = `Architecture plan:\n${cleanArch}\n\nInterface contract:\n${cleanInput}\n\nGenerate the complete implementation and unit test skeleton.`;
+      systemPrompt = 'You are the Coder peer in the MAD mesh. Build ONLY to the contract + architect plan on the bus. Flag any contract gaps as handoffs.';
+      prompt = `Architecture plan:\n${cleanArch}\n\nDistilled contract:\n${cleanInput}\n\nGenerate scoped implementation + handoff flags.`;
+      break;
+
+    case 'verifier':
+      systemPrompt = 'You are the Verifier peer in the MAD mesh. Converge: approve or request precise handoff fixes. Never ask for raw re-ingest.';
+      prompt = `Contract:\n${cleanInput}\n\nCoder:\n${cleanCoder}\n\nCritiques:\n${cleanSandbox}\n\nVerdict: approve or handoff fixes.`;
       break;
 
     case 'sandbox':
-      systemPrompt = 'You are the Sandbox Verification Agent in the MAD multi-agent harness. Verify syntax, dependencies, and execution safety.';
-      prompt = `Review this implementation for syntax errors, missing imports, and logic bugs:\n\n${cleanCoder}\n\nProvide verification report: lint status, type check, test execution results.`;
+      systemPrompt = 'You are the Sandbox peer in the MAD mesh. Verify syntax/deps/safety of the coder post on the bus.';
+      prompt = `Review this bus-posted implementation:\n\n${cleanCoder}\n\nReport: lint, types, tests.`;
       break;
 
     case 'debugger':
-      systemPrompt = 'You are the Debugger Agent in the MAD multi-agent harness. Perform quality analysis, boundary condition inspection, and final optimizations.';
-      prompt = `Sandbox report:\n${cleanSandbox}\n\nImplementation:\n${cleanCoder}\n\nPerform final debugging audit and confirm if code is production-ready.`;
+      systemPrompt = 'You are the Debugger peer in the MAD mesh. Final audit on bus state only.';
+      prompt = `Sandbox report:\n${cleanSandbox}\n\nImplementation:\n${cleanCoder}\n\nFinal audit: production-ready?`;
       break;
   }
 

@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { runLocalAgent } from './local-agent.js';
 import type { ProviderName, ProviderResponse } from '../types.js';
 import { sendToClaude } from './claude.js';
 import { sendToGroq } from './groq.js';
@@ -136,6 +137,19 @@ export async function sendToProvider(
       return sendToOllama(message);
     case 'gemini':
       return sendToGemini(message);
+    case 'opencode':
+    case 'pi': {
+      const result = await runLocalAgent(provider, [
+        ...(history ?? []),
+        { role: 'user', content: message },
+      ], {});
+      return {
+        content: result.content,
+        tokens: result.tokens,
+        model: result.model,
+        provider,
+      };
+    }
     default: {
       const _exhaustive: never = provider;
       throw new Error(`Unknown provider: ${_exhaustive}`);

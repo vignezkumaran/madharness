@@ -4,8 +4,8 @@ import { render } from 'ink';
 import { App } from '../components/App.js';
 
 export const chatCommand = new Command('chat')
-  .description('Start interactive chat with AI providers')
-  .option('-p, --provider <provider>', 'Default AI provider', 'claude')
+  .alias('tui')
+  .description('Start the interactive terminal agent harness')
   .action(async () => {
     const { waitUntilExit } = render(React.createElement(App));
     await waitUntilExit();

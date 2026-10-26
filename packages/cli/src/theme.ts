@@ -1,40 +1,33 @@
-// ─── MAD Harness Claude-Style Violet Design System ─────────────────────────────
-// Strict Palette: Violet, Black, White, and Grayscale tones.
-// Inspired by Claude Code terminal aesthetics + Anthropic design elegance.
-
+// ─── MAD · Black & Violet ───────────────────────────────────────────────────
 export const THEME = {
-  // ── Core Violets ──────────────────────────────────────────────────────────
-  primary: '#8B5CF6',       // Vibrant Electric Violet (Claude prompt, brand accent)
-  secondary: '#7C3AED',     // Deep Royal Violet (Active headers, sub-badges)
-  accent: '#A78BFA',        // Soft Lilac Violet (Assistant name, status accents)
-  highlight: '#C4B5FD',     // Pastel Lilac (Active states, checkmarks, success)
-  glow: '#DDD6FE',          // Pale Lavender Glow (Emphasized text, code highlights)
-  light: '#EDE9FE',         // Softest Violet Tint (High-contrast highlights)
+  primary: '#9370db',
+  secondary: '#8a2be2',
+  accent: '#a78bfa',
+  highlight: '#c084fc',
+  glow: '#e9d5ff',
+  light: '#f3e8ff',
 
-  // ── Violet Surface & Structure ───────────────────────────────────────────
-  border: '#8B5CF6',        // Electric Violet Border (Focused card, input container)
-  borderDim: '#5B21B6',     // Subdued Violet Border (Inactive borders, panel frames)
-  borderSubtle: '#3B1877',  // Deep Violet Separator (Dividers, horizontal rules)
-  bgViolet: '#2E1065',      // Deep Violet Background (Badges, selected highlights)
-  bgVioletCard: '#180E29',  // Dark Obsidian Violet (Card surfaces)
-  bgDark: '#0B0714',        // Deep Space Black/Violet (Terminal canvas)
+  border: '#8a2be2',
+  borderDim: '#4c1d95',
+  borderSubtle: '#2a1a3a',
+  bgViolet: '#2a0f3d',
+  bgVioletCard: '#140a1e',
+  bgDark: '#0a0a0a',
 
-  // ── Monochromes & Text ───────────────────────────────────────────────────
-  white: '#FFFFFF',         // Pure White (Crisp headings, primary user input)
-  text: '#F5F3FF',          // Off-white / Lavender-white (Body text paragraphs)
-  textMuted: '#9CA3AF',     // Slate Gray (Secondary descriptions, details)
-  textDim: '#6B7280',       // Dimmed Gray (Timestamps, keyboard hints)
-  black: '#000000',         // True Black
-  darkGray: '#1F2937',      // Charcoal (Meters, inactive progress bars)
+  white: '#f5f3ff',
+  text: '#e9e4f5',
+  textMuted: '#a89ac4',
+  textDim: '#6b5b85',
+  black: '#000000',
+  darkGray: '#1b1026',
 
-  // ── Semantic Colors (Strict Violet & Monochrome) ─────────────────────────
-  success: '#C4B5FD',       // Pastel Violet for Success / Completed (replaces green)
-  successDim: '#7C3AED',    // Subdued Violet for success backgrounds
-  warning: '#DDD6FE',       // Bright Lavender for Warnings (replaces yellow)
-  error: '#FFFFFF',         // High-contrast Pure White for Errors (replaces red)
-  errorAccent: '#A78BFA',   // Soft Violet for error details
-  errorBg: '#4C1D95',       // Deep Violet for error badges
-  info: '#A78BFA',          // Soft Lilac for Info
-  codeBg: '#130924',        // Code Block Dark Violet-Black
+  success: '#a78bfa',
+  successDim: '#7c3aed',
+  warning: '#d8b4fe',
+  error: '#ff6b9d',
+  danger: '#ff6b9d',
+  errorAccent: '#f0abfc',
+  errorBg: '#3b0a2a',
+  info: '#a78bfa',
+  codeBg: '#140a1e',
 };
-

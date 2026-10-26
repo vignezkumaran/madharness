@@ -30,6 +30,7 @@ Thumbs.db
 *.tar.gz
 
 # Cache & Scratch
+.lightning/
 .cache/
 scratch/
 tmp/

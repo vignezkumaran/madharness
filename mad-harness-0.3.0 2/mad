@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -e
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node "$DIR/packages/cli/dist/index.js" "$@"

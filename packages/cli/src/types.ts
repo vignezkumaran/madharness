@@ -17,6 +17,8 @@ export interface Message {
   model?: string;
   timestamp: Date;
   tokens?: number;
+  claudeCodeTokens?: number;
+  tokenSavingsPercent?: number;
   latency?: number;
   thought?: string;
   toolCalls?: ToolCallInfo[];
@@ -24,7 +26,7 @@ export interface Message {
 
 // ─── Provider Types ─────────────────────────────────────────────────────────
 
-export type ProviderName = 'claude' | 'codex' | 'groq' | 'ollama' | 'gemini';
+export type ProviderName = 'claude' | 'codex' | 'groq' | 'ollama' | 'gemini' | 'opencode' | 'pi';
 
 export interface ProviderConfig {
   name: ProviderName;
@@ -47,7 +49,11 @@ export interface ProviderState {
 
 // ─── DAG Types ──────────────────────────────────────────────────────────────
 
-export type DAGPhase = 'ast-intake' | 'architect' | 'coder' | 'debugger';
+// MAD is NOT a linear chain: agents share a Mesh Bus (blackboard).
+// Phases below are bus participants, not a waterfall.
+export type DAGPhase = 'distill' | 'architect' | 'coder' | 'verifier';
+// Back-compat aliases from the old linear pipeline naming:
+export type LegacyDAGPhase = 'ast-intake' | 'debugger';
 export type DAGStatus = 'pending' | 'running' | 'passed' | 'failed' | 'halted';
 
 export interface DAGNode {
@@ -62,10 +68,15 @@ export interface DAGNode {
 
 // ─── App State Types ────────────────────────────────────────────────────────
 
-export type AppView = 'chat' | 'providers' | 'dag' | 'help' | 'config' | 'tools';
+// Three pillars — this is what makes MAD different from Lightning Harness:
+//   distill → token-reducing AST contract engine
+//   mesh    → agent communication bus (blackboard, handoffs, shared context)
+//   fabric  → multi-provider router (fan-out, fallback, cost-aware)
+export type AppView = 'chat' | 'distill' | 'mesh' | 'fabric' | 'benchmark' | 'dag' | 'tools' | 'providers' | 'help' | 'config';
 
 export interface TokenUsage {
   used: number;
+  claudeCodeEquivalent: number;
   budget: number;
 }
 
@@ -91,7 +102,7 @@ export type MADAction =
   | { type: 'SET_PROCESSING'; payload: boolean }
   | { type: 'SET_PROVIDER'; payload: ProviderName | null }
   | { type: 'SET_AWAITING_LOGIN'; payload: ProviderName | null }
-  | { type: 'UPDATE_TOKENS'; payload: { used: number } }
+  | { type: 'UPDATE_TOKENS'; payload: { used: number; claudeCodeEquivalent?: number } }
   | { type: 'SET_ERROR'; payload: string | null }
   | { type: 'SET_VIEW'; payload: AppView }
   | { type: 'UPDATE_DAG_NODE'; payload: { phase: DAGPhase; updates: Partial<DAGNode> } }
@@ -105,7 +116,7 @@ export type MADAction =
 // ─── Command Parsing ────────────────────────────────────────────────────────
 
 export interface ParsedCommand {
-  type: 'provider_message' | 'switch' | 'status' | 'config' | 'connect' | 'keys' | 'login' | 'block' | 'help' | 'exit' | 'plain_message' | 'dag' | 'clear' | 'tools' | 'jira' | 'git' | 'mcp';
+  type: 'provider_message' | 'switch' | 'status' | 'config' | 'connect' | 'keys' | 'login' | 'block' | 'help' | 'exit' | 'plain_message' | 'dag' | 'clear' | 'tools' | 'jira' | 'git' | 'mcp' | 'benchmark' | 'compare' | 'distill';
   provider?: ProviderName;
   args?: string;
   key?: string;

@@ -18,13 +18,15 @@ import { providerManager } from '../providers/manager.js';
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const runCommand = new Command('run')
-  .description('Run the MAD agent pipeline on a Python file')
-  .argument('<file>', 'Python file to process')
+  .alias('pipeline')
+  .description('Run the deterministic AST pipeline on a Python file')
+  .argument('[file]', 'Python file to process', 'benchmark_large.py')
   .option('--dry-run', 'Only run AST pruning, skip pipeline execution')
   .option('--verbose', 'Show detailed agent output')
   .option('--retries <n>', 'Override max retries per node (default: 3)', '3')
   .action(async (file: string, options: { dryRun?: boolean; verbose?: boolean; retries?: string }) => {
-    const filePath = path.resolve(file);
+    const targetFile = file || 'benchmark_large.py';
+    const filePath = path.resolve(targetFile);
     const maxRetries = parseInt(options.retries ?? '3', 10);
 
     // ── Validate input ────────────────────────────────────────────────────
@@ -40,29 +42,51 @@ export const runCommand = new Command('run')
 
     // ── Header ────────────────────────────────────────────────────────────
     console.log();
-    console.log(chalk.bold.cyan('⚡ MAD Harness — Running Pipeline'));
-    console.log(chalk.dim('─'.repeat(50)));
+    console.log(chalk.bold.hex('#8B5CF6')('⚡ MAD HARNESS — DETERMINISTIC MULTI-AGENT PIPELINE'));
+    console.log(chalk.hex('#A78BFA')('   Executing AST Contract Intake ➔ Architect ➔ Coder ➔ Debugger'));
+    console.log(chalk.hex('#4C1D95')('═'.repeat(68)));
     console.log();
-    console.log(chalk.white(`📂 Target: ${chalk.cyan(file)}`));
+    console.log(chalk.white(`📂 Target: ${chalk.hex('#C4B5FD').bold(path.basename(filePath))} `) + chalk.dim(`(${path.relative(process.cwd(), filePath)})`));
     console.log();
 
     // ── AST Pruning ──────────────────────────────────────────────────────
     try {
+      const originalContent = fs.readFileSync(filePath, 'utf-8');
       const contract = pruneFile(filePath, defaultConfig.ast);
 
-      console.log(chalk.bold.white('🔍 AST Pruning:'));
-      console.log(chalk.white(`   Original:  ${chalk.yellow(String(contract.originalLines))} lines`));
-      console.log(chalk.white(`   Pruned:    ${chalk.green(String(contract.prunedLines))} lines`));
-      console.log(chalk.white(`   Savings:   ${chalk.green(contract.tokenSavingsPercent.toFixed(1) + '%')} token reduction`));
+      const originalTokens = Math.ceil(originalContent.length / 4);
+      const prunedTokens = Math.ceil(contract.prunedContent.length / 4);
+      const savedTokens = Math.max(0, originalTokens - prunedTokens);
+      const pctSaved = originalTokens > 0 ? ((savedTokens / originalTokens) * 100).toFixed(1) : '0';
+      const multiplier = prunedTokens > 0 ? (originalTokens / prunedTokens).toFixed(1) : '1';
+
+      console.log(chalk.bold.hex('#C4B5FD')('🔍 Stage 1: AST Contract Intake (vs Claude Code Baseline):'));
+      console.log(chalk.dim('   Strategy                   Lines        Tokens   Context Window'));
+      console.log(chalk.hex('#3B1877')('   ' + '─'.repeat(60)));
+      console.log(
+        chalk.dim('   Claude Code (Raw)     ') +
+        String(contract.originalLines).padStart(10) +
+        originalTokens.toLocaleString().padStart(14) +
+        '   100% (Full Body)'
+      );
+      console.log(
+        chalk.hex('#8B5CF6').bold('   ⚡ MAD Harness (AST)  ') +
+        chalk.hex('#C4B5FD').bold(String(contract.prunedLines).padStart(10)) +
+        chalk.hex('#C4B5FD').bold(prunedTokens.toLocaleString().padStart(14)) +
+        chalk.hex('#DDD6FE').bold(`   ${(100 - parseFloat(pctSaved)).toFixed(1)}% (Contracts Only)`)
+      );
+      console.log(chalk.hex('#3B1877')('   ' + '─'.repeat(60)));
+      console.log(
+        chalk.hex('#C4B5FD').bold(`   ✓ Efficiency: ${pctSaved}% Token Savings `) +
+        chalk.dim(`· Saved ${savedTokens.toLocaleString()} tokens · ${multiplier}x cheaper payload`)
+      );
+      console.log();
 
       if (contract.classes.length > 0) {
-        console.log(chalk.white(`   Classes:   ${chalk.cyan(contract.classes.join(', '))}`));
+        console.log(chalk.dim('   Classes:   ') + chalk.hex('#C4B5FD')(contract.classes.join(', ')));
       }
       if (contract.functions.length > 0) {
-        console.log(chalk.white(`   Functions: ${chalk.cyan(contract.functions.join(', '))}`));
-      }
-      if (contract.imports.length > 0) {
-        console.log(chalk.white(`   Imports:   ${chalk.dim(String(contract.imports.length) + ' statements')}`));
+        console.log(chalk.dim('   Functions: ') + chalk.hex('#A78BFA')(contract.functions.join(', ')));
       }
 
       if (options.verbose) {

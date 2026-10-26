@@ -1,104 +1,75 @@
 import { Command } from 'commander';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import chalk from 'chalk';
 import { providerManager } from '../providers/manager.js';
 
-// ─── Phase 1 Checklist ──────────────────────────────────────────────────────
-
-interface ChecklistItem {
-  name: string;
-  done: boolean;
-}
-
-const PHASE1_CHECKLIST: ChecklistItem[] = [
-  { name: 'CLI skeleton (Node.js + TypeScript)', done: true },
-  { name: 'mad run command', done: true },
-  { name: 'AST Pruner (TypeScript)', done: true },
-  { name: 'DAG State Machine (TypeScript)', done: true },
-  { name: 'Mock agents (Architect, Coder, Sandbox, Debugger)', done: true },
-  { name: 'Basic config file', done: true },
-  { name: 'mad status command', done: true },
-  { name: 'Project structure complete', done: true },
-];
-
-// ─── mad status Command ─────────────────────────────────────────────────────
+const execFileAsync = promisify(execFile);
 
 export const statusCommand = new Command('status')
-  .description('Show MAD Harness status and Phase 1 progress')
-  .action(() => {
-    console.log(chalk.bold.hex('#8B5CF6')('\n⚡ MAD Harness Status (Claude Architecture)\n'));
-    console.log(chalk.hex('#4C1D95')('─'.repeat(50)));
+  .description('Show harness, workspace, and provider status')
+  .action(async () => {
+    console.log();
+    console.log(chalk.bold.hex('#9370db')('◈ MAD') + chalk.white(' — terminal multi-agent harness'));
+    console.log(chalk.dim('  supervisor + parallel workers · distill · mesh bus · provider fabric'));
+    console.log(chalk.hex('#2a1a3a')('─'.repeat(64)));
 
-    // ── Provider Status ───────────────────────────────────────────────────
-    console.log(chalk.bold.white('\n🔌 Model Providers in Harness:\n'));
-
-    const providers = providerManager.getAllProviders();
-    let connectedCount = 0;
-
-    for (const [name, provider] of providers) {
-      const isConnected = providerManager.hasApiKey(name);
-      if (isConnected) connectedCount++;
-
-      const statusIcon = isConnected
-        ? chalk.hex('#C4B5FD')('●')
-        : chalk.dim('○');
-      const statusText = isConnected
-        ? chalk.hex('#C4B5FD').bold('Active & Listed') + chalk.dim(` (${providerManager.getMaskedKey(name)})`)
-        : chalk.dim('Not Listed (no API key)');
-
-      console.log(
-        `  ${statusIcon} ${chalk.bold(provider.config.displayName.padEnd(22))} ` +
-        `${chalk.dim(`(${provider.config.model})`)} — ${statusText}`
-      );
+    let branch = '(not a git repo)';
+    try {
+      const { stdout } = await execFileAsync('git', ['branch', '--show-current'], { cwd: process.cwd(), timeout: 5000 });
+      branch = stdout.trim() || '(detached)';
+    } catch {
+      // not a repo
     }
 
     console.log();
-    if (connectedCount === 0) {
-      console.log(chalk.hex('#DDD6FE')('  ⚠ No models are listed in this harness yet.'));
-      console.log(chalk.dim('    Run ') + chalk.hex('#8B5CF6')('mad chat') + chalk.dim(' and type ') + chalk.hex('#8B5CF6')('groq/login') + chalk.dim(' to paste your key.'));
+    console.log(chalk.bold.white('Workspace'));
+    console.log(`  ${chalk.dim('cwd')}    ${process.cwd()}`);
+    console.log(`  ${chalk.dim('branch')} ${branch}`);
+
+    console.log();
+    console.log(chalk.bold.white('Providers'));
+    let connected = 0;
+    let localAgents = 0;
+    for (const [name, provider] of providerManager.getVisibleProviders()) {
+      const local = providerManager.isLocalAgentName(name);
+      const configured = providerManager.isConfigured(name);
+      if (local && configured) localAgents++;
+      else if (name !== 'ollama' && configured) connected++;
+      const icon = configured
+        ? chalk.hex('#9370db')('●')
+        : name === 'ollama'
+          ? chalk.hex('#d8b4fe')('○')
+          : chalk.dim('○');
+      const label = local
+        ? configured ? chalk.dim('local CLI · detected') : chalk.dim('local CLI · missing')
+        : provider.config.apiKey
+          ? chalk.dim(providerManager.getMaskedKey(name))
+          : name === 'ollama'
+            ? chalk.dim('local · http://localhost:11434')
+            : chalk.dim('not connected');
+      console.log(`  ${icon} ${provider.config.displayName.padEnd(24)} ${chalk.dim(provider.config.model.padEnd(38))} ${label}`);
+    }
+
+    console.log();
+    if (connected === 0 && localAgents === 0) {
+      console.log(chalk.hex('#d8b4fe')('  No provider connected.'));
+      console.log(chalk.dim('  Run: ') + chalk.hex('#9370db')('mad auth') + chalk.dim(' and paste any provider key (auto-detected).'));
     } else {
-      console.log(chalk.hex('#C4B5FD')(`  ✓ ${connectedCount} model(s) authenticated and ready for chat/DAG.`));
+      const parts = [
+        connected ? `${connected} hosted provider(s)` : '',
+        localAgents ? `${localAgents} local agent(s) detected` : '',
+        'ollama available if running',
+      ].filter(Boolean);
+      console.log(chalk.hex('#9370db')(`  ${parts.join(' · ')}.`));
     }
 
-    // ── Phase 1 Checklist ─────────────────────────────────────────────────
     console.log();
-    console.log(chalk.hex('#4C1D95')('─'.repeat(50)));
-    console.log(chalk.bold.white('\n📊 Phase 1 Checklist:\n'));
-
-    let doneCount = 0;
-    for (const item of PHASE1_CHECKLIST) {
-      if (item.done) {
-        doneCount++;
-        console.log(chalk.hex('#C4B5FD')(`   ✓ ${item.name}`));
-      } else {
-        console.log(chalk.dim(`   ○ ${item.name}`));
-      }
-    }
-
-    const totalCount = PHASE1_CHECKLIST.length;
-    const progressPercent = Math.round((doneCount / totalCount) * 100);
-    const barFilled = Math.round((doneCount / totalCount) * 20);
-    const barEmpty = 20 - barFilled;
-    const progressBar = chalk.hex('#8B5CF6')('■'.repeat(barFilled)) + chalk.hex('#4C1D95')('░'.repeat(barEmpty));
-
-    console.log();
-    console.log(`   Progress: ${progressBar} ${chalk.bold.hex('#C4B5FD')(`${progressPercent}%`)} (${doneCount}/${totalCount})`);
-
-    // ── Quick Commands ────────────────────────────────────────────────────
-    console.log();
-    console.log(chalk.hex('#4C1D95')('─'.repeat(50)));
-    console.log();
-    console.log(chalk.dim('  Quick commands:'));
-    console.log(
-      chalk.hex('#8B5CF6')('  npm run chat      ') +
-      chalk.dim('  — Start interactive Claude chat (type groq/login to paste key)')
-    );
-    console.log(
-      chalk.hex('#8B5CF6')('  mad run <file.py> ') +
-      chalk.dim('  — Run the agent pipeline')
-    );
-    console.log(
-      chalk.hex('#8B5CF6')('  mad benchmark     ') +
-      chalk.dim('  — Benchmark AST token reduction')
-    );
+    console.log(chalk.hex('#2a1a3a')('─'.repeat(64)));
+    console.log(chalk.dim('  mad                     interactive agent'));
+    console.log(chalk.dim('  mad "fix the tests"     one-shot agent'));
+    console.log(chalk.dim('  mad ask "..."           direct model answer'));
+    console.log(chalk.dim('  mad pipeline file.py    deterministic AST pipeline'));
+    console.log(chalk.dim('  mad benchmark           token reduction report'));
     console.log();
   });
