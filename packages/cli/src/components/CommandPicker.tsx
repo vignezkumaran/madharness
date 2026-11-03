@@ -54,15 +54,19 @@ function statusColor(status?: PickerStatus): string {
 
 export const CommandPicker: React.FC<CommandPickerProps> = ({ picker, onSelect, onCancel }) => {
   const [selected, setSelected] = useState(0);
-  const count = picker.items.length;
+  const [query, setQuery] = useState('');
+  const items = picker.kind === 'models' && query ? picker.items.filter(item => `${item.label} ${item.meta ?? ''}`.toLowerCase().includes(query.toLowerCase())) : picker.items;
+  const count = items.length;
 
   useEffect(() => {
     setSelected(0);
-  }, [picker.kind, picker.title, count]);
+  }, [picker.kind, picker.title, count, query]);
 
   useInput((input, key) => {
+    if (key.escape) { onCancel(); return; }
+    if (picker.kind === 'models' && (key.backspace || key.delete)) { setQuery(value => value.slice(0, -1)); return; }
+    if (picker.kind === 'models' && input && !key.ctrl && !key.meta && !key.return && !key.upArrow && !key.downArrow && !key.leftArrow && !key.rightArrow && !key.tab) { setQuery(value => value + input); return; }
     if (count === 0) {
-      if (key.escape) onCancel();
       return;
     }
 
@@ -75,7 +79,7 @@ export const CommandPicker: React.FC<CommandPickerProps> = ({ picker, onSelect, 
       return;
     }
     if (key.return || input === '\r' || input === '\n') {
-      const item = picker.items[selected];
+      const item = items[selected];
       if (item) onSelect(item);
       return;
     }
@@ -83,8 +87,8 @@ export const CommandPicker: React.FC<CommandPickerProps> = ({ picker, onSelect, 
   });
 
   const start = Math.max(0, Math.min(selected - Math.floor(WINDOW_SIZE / 2), count - WINDOW_SIZE));
-  const visible = picker.items.slice(start, start + WINDOW_SIZE);
-  const current = picker.items[selected];
+  const visible = items.slice(start, start + WINDOW_SIZE);
+  const current = items[selected];
 
   return (
     <Box
@@ -101,6 +105,7 @@ export const CommandPicker: React.FC<CommandPickerProps> = ({ picker, onSelect, 
         </Box>
         <Text color={THEME.textDim}>{count} option{count === 1 ? '' : 's'}</Text>
       </Box>
+      {picker.kind === 'models' ? <Text color={THEME.textDim}>Search: {query || 'type to filter models'}</Text> : null}
 
       {count > 0 ? (
         <Box flexDirection="column" marginTop={1}>

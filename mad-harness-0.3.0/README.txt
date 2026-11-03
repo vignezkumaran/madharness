@@ -28,9 +28,9 @@ Connect a provider
 Local agents (no API key)
 -------------------------
   OpenCode is the default provider and is auto-detected from PATH.
-  It uses its own installed CLI and local credentials for direct chat.
+  It uses its own installed CLI and local credentials for both chat and /dag.
+  If a free model is rate-limited, MAD rotates to the next available model.
   Pi is auto-detected but disabled by default.
-  The /dag pipeline requires a hosted or Ollama provider.
 
 TUI commands
 ------------

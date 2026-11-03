@@ -20,7 +20,7 @@ export const HarnessEntry: React.FC<{ entry: TranscriptEntry }> = ({ entry }) =>
     return (
       <Box flexDirection="column" marginBottom={1}>
         <Box>
-          <Text color={THEME.primary} bold>◈ MAD</Text>
+          <Text color={THEME.primary} bold>◈ {entry.title??'MAD'}</Text>
           <Text color={THEME.textDim}> agent</Text>
         </Box>
         <Box paddingLeft={2} flexDirection="column">

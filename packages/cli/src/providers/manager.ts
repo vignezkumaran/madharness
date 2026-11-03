@@ -1,481 +1,246 @@
+// ─── Provider manager: registry, keyring, models, fallback chain ────────────
+import {nativeOllamaClient} from './ollama-native.js';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import Conf from 'conf';
-import { execFile, spawnSync } from 'child_process';
-import type { ProviderName, ProviderConfig, ProviderState, ProviderStatus } from '../types.js';
-
-// ─── Default Provider Configurations ────────────────────────────────────────
-
-const DEFAULT_CONFIGS: Record<ProviderName, ProviderConfig> = {
-  groq: {
-    name: 'groq',
-    displayName: 'Groq GPT-OSS 120B',
-    model: 'openai/gpt-oss-120b',
-    isAvailable: true,
-    maxTokens: 32768,
-  },
-  claude: {
-    name: 'claude',
-    displayName: 'Claude 3.5 Sonnet',
-    model: 'claude-3-5-sonnet-20241022',
-    isAvailable: true,
-    maxTokens: 100000,
-  },
-  codex: {
-    name: 'codex',
-    displayName: 'GPT-4o (OpenAI)',
-    model: 'gpt-4o',
-    isAvailable: true,
-    maxTokens: 128000,
-  },
-  gemini: {
-    name: 'gemini',
-    displayName: 'Gemini 2.0 Flash',
-    model: 'gemini-2.0-flash',
-    isAvailable: true,
-    maxTokens: 128000,
-  },
-  ollama: {
-    name: 'ollama',
-    displayName: 'Ollama (Local)',
-    model: 'llama3',
-    baseUrl: 'http://localhost:11434',
-    isAvailable: true,
-    maxTokens: 4096,
-  },
-  opencode: {
-    name: 'opencode',
-    displayName: 'OpenCode (local agent)',
-    model: 'opencode/deepseek-v4.1-flash-free',
-    isAvailable: true,
-    maxTokens: 32768,
-  },
-  pi: {
-    name: 'pi',
-    displayName: 'Pi (local agent)',
-    model: 'default',
-    isAvailable: true,
-    maxTokens: 32768,
-  },
-};
-
-// Curated model IDs per provider. The configured model is always included too.
-export const PROVIDER_MODELS: Record<ProviderName, string[]> = {
-  groq: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
-  claude: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
-  codex: ['gpt-4o', 'gpt-4o-mini', 'o3-mini'],
-  gemini: ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro'],
-  ollama: ['llama3', 'qwen2.5-coder', 'deepseek-coder-v2'],
-  opencode: ['opencode/deepseek-v4.1-flash-free', 'opencode/big-pickle'],
-  pi: ['default'],
-};
-
-// ─── Provider Fabric (multi-provider router) ────────────────────────────────
-// Lightning-style harnesses lock to one fast model. MAD Fabric instead:
-//   - fan-out: one prompt → many providers at once (compare/consensus)
-//   - fallback: if primary fails/rate-limits, auto-route to next live key
-//   - cost-aware: prefer cheapest connected model for distill-friendly tasks
-// ─────────────────────────────────────────────────────────────────────────────
-
-export type FabricStrategy = 'fallback' | 'fanout' | 'cheapest';
-
-const LOCAL_AGENTS: ProviderName[] = ['opencode', 'pi'];
-const DEFAULT_DISABLED_PROVIDERS: ProviderName[] = ['groq', 'pi'];
-const DEFAULT_PROVIDER: ProviderName = 'opencode';
-
-export class ProviderManager {
-  private config: Conf<Record<string, unknown>>;
-  private providers: Map<ProviderName, ProviderState>;
-  private fallbackOrder: ProviderName[] = ['groq', 'claude', 'gemini', 'codex', 'ollama'];
-  private disabledProviders: Set<ProviderName>;
-  private binaryCache = new Map<ProviderName, boolean>();
-  private localModelCache = new Map<ProviderName, string[]>();
-  private localModelPromises = new Map<ProviderName, Promise<string[]>>();
-
-  constructor() {
-    this.config = new Conf({ projectName: 'mad-harness' });
-    this.providers = new Map();
-    const stored = this.config.get('disabledProviders') as string[] | undefined;
-    const disabled = Array.isArray(stored) ? stored : DEFAULT_DISABLED_PROVIDERS;
-    this.disabledProviders = new Set(
-      disabled.filter((name): name is ProviderName => typeof name === 'string' && name in DEFAULT_CONFIGS)
-    );
-    this.initializeProviders();
-  }
-
-  isProviderDisabled(name: ProviderName): boolean {
-    return this.disabledProviders.has(name);
-  }
-
-  getVisibleProviders(): Map<ProviderName, ProviderState> {
-    return new Map(
-      Array.from(this.providers.entries()).filter(([name]) => !this.isProviderDisabled(name))
-    );
-  }
-
-  setProviderDisabled(name: ProviderName, disabled: boolean): void {
-    if (disabled) this.disabledProviders.add(name);
-    else this.disabledProviders.delete(name);
-    this.config.set('disabledProviders', Array.from(this.disabledProviders));
-  }
-
-  public resolveProviderName(raw: string): ProviderName | null {
-    const clean = raw.trim().toLowerCase();
-    if (clean === 'groq' || clean === 'grok') return 'groq';
-    if (clean === 'claude' || clean === 'anthropic') return 'claude';
-    if (clean === 'codex' || clean === 'openai' || clean === 'gpt' || clean === 'gpt4' || clean === 'gpt-4o') return 'codex';
-    if (clean === 'gemini' || clean === 'google') return 'gemini';
-    if (clean === 'ollama' || clean === 'local') return 'ollama';
-    if (clean === 'opencode' || clean === 'open-code') return 'opencode';
-    if (clean === 'pi') return 'pi';
-    return null;
-  }
-
-  private isLocalAgent(name: ProviderName): boolean {
-    return LOCAL_AGENTS.includes(name);
-  }
-
-  private parseOpencodeModels(stdout: string): string[] {
-    const clean = stdout.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
-    return clean
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line && !line.includes(' ') && line.includes('/'));
-  }
-
-  private parsePiModels(stdout: string): string[] {
-    const clean = stdout.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '');
-    return clean
-      .split('\n')
-      .slice(1)
-      .map((line) => line.trimEnd())
-      .filter((line) => line.trim() && !/^[-\s]+$/.test(line))
-      .map((line) => {
-        const columns = line.trim().split(/\s{2,}/);
-        const provider = columns[0]?.trim();
-        const model = columns[1]?.trim();
-        if (!provider || !model) return '';
-        return `${provider}/${model}`;
-      })
-      .filter(Boolean);
-  }
-
-  private extractLocalModels(name: ProviderName): Promise<string[]> {
-    const cached = this.localModelCache.get(name);
-    if (cached) return Promise.resolve(cached);
-    const inflight = this.localModelPromises.get(name);
-    if (inflight) return inflight;
-    if (!this.isLocalAgent(name) || !this.binaryAvailable(name)) {
-      this.localModelCache.set(name, []);
-      return Promise.resolve([]);
-    }
-
-    const command = name === 'opencode' ? 'opencode' : 'pi';
-    const args = name === 'opencode' ? ['models'] : ['--list-models'];
-    const promise = new Promise<string[]>((resolve) => {
-      execFile(
-        command,
-        args,
-        {
-          encoding: 'utf8',
-          timeout: 20_000,
-          maxBuffer: 4 * 1024 * 1024,
-          env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
-        },
-        (error, stdout) => {
-          const models = !error && stdout
-            ? name === 'opencode'
-              ? this.parseOpencodeModels(stdout)
-              : this.parsePiModels(stdout)
-            : [];
-          const unique = [...new Set(models)];
-          this.localModelCache.set(name, unique);
-          resolve(unique);
-        }
-      );
-    });
-
-    this.localModelPromises.set(name, promise);
-    void promise.then(() => this.localModelPromises.delete(name));
-    return promise;
-  }
-
-  /** Import the model catalog from each detected local CLI. */
-  async warmLocalModels(): Promise<void> {
-    await Promise.all(
-      LOCAL_AGENTS
-        .filter((name) => !this.isProviderDisabled(name) && this.binaryAvailable(name))
-        .map((name) => this.extractLocalModels(name))
-    );
-  }
-
-  private binaryAvailable(name: ProviderName): boolean {
-    const cached = this.binaryCache.get(name);
-    if (cached !== undefined) return cached;
-    try {
-      const command = process.platform === 'win32' ? 'where' : 'which';
-      const result = spawnSync(command, [name], { stdio: 'ignore' });
-      const available = result.status === 0;
-      this.binaryCache.set(name, available);
-      return available;
-    } catch {
-      this.binaryCache.set(name, false);
-      return false;
-    }
-  }
-
-  private syncToEnv(name: ProviderName, key?: string): void {
-    if (!key) return;
-    if (name === 'claude') process.env.ANTHROPIC_API_KEY = key;
-    else if (name === 'groq') process.env.GROQ_API_KEY = key;
-    else if (name === 'codex') process.env.OPENAI_API_KEY = key;
-    else if (name === 'gemini') {
-      process.env.GEMINI_API_KEY = key;
-      process.env.GOOGLE_API_KEY = key;
-    }
-  }
-
-  private clearFromEnv(name: ProviderName): void {
-    if (name === 'claude') delete process.env.ANTHROPIC_API_KEY;
-    else if (name === 'groq') delete process.env.GROQ_API_KEY;
-    else if (name === 'codex') delete process.env.OPENAI_API_KEY;
-    else if (name === 'gemini') {
-      delete process.env.GEMINI_API_KEY;
-      delete process.env.GOOGLE_API_KEY;
-    }
-  }
-
-  private initializeProviders(): void {
-    for (const [name, config] of Object.entries(DEFAULT_CONFIGS)) {
-      const pName = name as ProviderName;
-      const savedModel = this.config.get(`models.${pName}`) as string | undefined;
-      let savedKey = this.config.get(`apiKeys.${pName}`) as string | undefined;
-
-      // Check process.env if not in saved config
-      if (!savedKey) {
-        if (pName === 'claude') savedKey = process.env.ANTHROPIC_API_KEY;
-        else if (pName === 'groq') savedKey = process.env.GROQ_API_KEY;
-        else if (pName === 'codex') savedKey = process.env.OPENAI_API_KEY;
-        else if (pName === 'gemini') savedKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-      } else {
-        this.syncToEnv(pName, savedKey);
-      }
-
-      const isConnected = this.isLocalAgent(pName)
-        ? this.binaryAvailable(pName)
-        : Boolean(savedKey);
-      const savedOrDefault = savedModel === 'default' && pName === 'opencode' ? config.model : savedModel;
-
-      this.providers.set(pName, {
-        config: {
-          ...config,
-          model: savedOrDefault || config.model,
-          apiKey: savedKey,
-          isAvailable: this.isLocalAgent(pName) ? isConnected : config.isAvailable,
-        },
-        status: isConnected ? 'connected' : 'disconnected',
-        totalTokens: 0,
-      });
-    }
-  }
-
-  getProvider(name: ProviderName): ProviderState | undefined {
-    return this.providers.get(name);
-  }
-
-  getAllProviders(): Map<ProviderName, ProviderState> {
-    return new Map(this.providers);
-  }
-
-  /** Returns providers that can serve requests (cloud keys or detected local agents). */
-  getConnectedProviders(): Map<ProviderName, ProviderState> {
-    const map = new Map<ProviderName, ProviderState>();
-    for (const [name] of this.providers) {
-      if (this.hasApiKey(name)) map.set(name, this.providers.get(name)!);
-    }
-    return map;
-  }
-
-  getFirstConnectedProvider(): ProviderName | null {
-    if (this.hasApiKey(DEFAULT_PROVIDER)) return DEFAULT_PROVIDER;
-    for (const name of this.fallbackOrder) {
-      if (name === 'ollama') continue;
-      if (this.hasApiKey(name)) return name;
-    }
-    for (const name of LOCAL_AGENTS) {
-      if (this.hasApiKey(name)) return name;
-    }
-    return null;
-  }
-
-  hasApiKey(name: ProviderName): boolean {
-    if (this.isProviderDisabled(name)) return false;
-    if (this.isLocalAgent(name)) return this.binaryAvailable(name);
-    const p = this.providers.get(name);
-    return Boolean(p?.config.apiKey && p.status === 'connected');
-  }
-
-  isConfigured(name: ProviderName): boolean {
-    if (name === 'ollama') return true;
-    return this.hasApiKey(name);
-  }
-
-  setApiKey(name: ProviderName, key: string): void {
-    if (this.isLocalAgent(name) || this.isProviderDisabled(name)) return;
-    const trimmed = key.trim();
-    this.config.set(`apiKeys.${name}`, trimmed);
-    this.syncToEnv(name, trimmed);
-
-    const provider = this.providers.get(name);
-    if (provider) {
-      provider.config.apiKey = trimmed;
-      provider.status = 'connected';
-    }
-  }
-
-  removeApiKey(name: ProviderName): void {
-    if (this.isLocalAgent(name)) return;
-    this.config.delete(`apiKeys.${name}`);
-    this.clearFromEnv(name);
-
-    const provider = this.providers.get(name);
-    if (provider) {
-      provider.config.apiKey = undefined;
-      provider.status = 'disconnected';
-    }
-  }
-
-  getApiKey(name: ProviderName): string | undefined {
-    const provider = this.providers.get(name);
-    if (provider?.config.apiKey) return provider.config.apiKey;
-    if (name === 'claude') return process.env.ANTHROPIC_API_KEY;
-    if (name === 'groq') return process.env.GROQ_API_KEY;
-    if (name === 'codex') return process.env.OPENAI_API_KEY;
-    if (name === 'gemini') return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-    return undefined;
-  }
-
-  getMaskedKey(name: ProviderName): string {
-    if (this.isLocalAgent(name)) return '(local CLI)';
-    const key = this.getApiKey(name);
-    if (!key) return '(not connected)';
-    if (key.length <= 8) return '****';
-    return `${key.slice(0, 6)}...${key.slice(-4)}`;
-  }
-
-  /** Detect a provider from the shape of an API key, like opencode. */
-  detectProviderFromKey(rawKey: string): ProviderName | null {
-    const key = rawKey.trim();
-    if (!key) return null;
-    if (key.startsWith('gsk_')) return 'groq';
-    if (key.startsWith('sk-ant-')) return 'claude';
-    if (key.startsWith('AIza')) return 'gemini';
-    if (key.startsWith('sk-or-')) return null;
-    if (key.startsWith('sk-')) return 'codex';
-    return null;
-  }
-
-  /** Curated + configured model IDs for a provider, de-duplicated. */
-  getModelsFor(name: ProviderName): string[] {
-    if (this.isProviderDisabled(name)) return [];
-    if (this.isLocalAgent(name)) {
-      const configured = this.providers.get(name)?.config.model;
-      const extracted = this.localModelCache.get(name) ?? [];
-      if (!this.localModelCache.has(name)) void this.extractLocalModels(name);
-      return [...new Set([configured ?? 'default', ...extracted].filter(Boolean) as string[])];
-    }
-    const provider = this.providers.get(name);
-    const configured = provider?.config.model;
-    return [...new Set([configured, ...(PROVIDER_MODELS[name] ?? [])].filter(Boolean) as string[])];
-  }
-
-  getSavedProvider(): ProviderName | null {
-    const saved = this.config.get('activeProvider') as ProviderName | undefined;
-    if (saved && this.providers.has(saved) && !this.isProviderDisabled(saved) && this.isConfigured(saved)) return saved;
-    return null;
-  }
-
-  setActiveProvider(name: ProviderName | null): void {
-    if (name && this.isProviderDisabled(name)) return;
-    if (name) this.config.set('activeProvider', name);
-    else this.config.delete('activeProvider');
-  }
-
-  setModel(name: ProviderName, model: string): void {
-    const trimmed = model.trim();
-    if (!trimmed) return;
-    const provider = this.providers.get(name);
-    if (!provider) return;
-    provider.config.model = trimmed;
-    this.config.set(`models.${name}`, trimmed);
-  }
-
-  getActiveProvider(current: ProviderName | null): ProviderState | null {
-    if (current) {
-      const provider = this.providers.get(current);
-      if (provider && (this.isConfigured(current) || current === 'ollama')) {
-        return provider;
-      }
-    }
-
-    const first = this.getFirstConnectedProvider();
-    if (first) return this.providers.get(first)!;
-
-    return null;
-  }
-
-  isProviderAvailable(name: ProviderName): boolean {
-    return this.isConfigured(name);
-  }
-
-  isLocalAgentName(name: ProviderName): boolean {
-    return this.isLocalAgent(name);
-  }
-
-  getProviderDisplayName(name: ProviderName | null): string {
-    if (!name) return 'No Model';
-    return this.providers.get(name)?.config.displayName ?? name;
-  }
-
-  updateProviderStatus(name: ProviderName, status: ProviderStatus): void {
-    const provider = this.providers.get(name);
-    if (provider) {
-      provider.status = status;
-    }
-  }
-
-  // ── Fabric helpers ──────────────────────────────────────────────────────
-
-  /** Ordered live providers for fallback routing. */
-  getFallbackChain(exclude?: ProviderName): ProviderName[] {
-    return this.fallbackOrder.filter((n) => {
-      if (exclude && n === exclude) return false;
-      if (this.isProviderDisabled(n)) return false;
-      const p = this.providers.get(n);
-      return Boolean(p?.config.apiKey && p.status === 'connected');
-    });
-  }
-
-  /** All live providers for fan-out (parallel ask). */
-  getFanoutSet(): ProviderName[] {
-    return this.getFallbackChain();
-  }
-
-  /** Cheapest-first routing for distilled (small-contract) tasks. */
-  pickCheapest(): ProviderName | null {
-    const cheapFirst: ProviderName[] = ['groq', 'gemini', 'codex', 'claude', 'ollama'];
-    for (const n of cheapFirst) {
-      if (this.isProviderDisabled(n)) continue;
-      const p = this.providers.get(n);
-      if (p?.config.apiKey && p.status === 'connected') return n;
-    }
-    return null;
-  }
-
-  getFabricSummary(): { live: ProviderName[]; strategy: FabricStrategy; cheapest: ProviderName | null } {
-    const live = this.getFallbackChain();
-    return { live, strategy: live.length > 1 ? 'fanout' : 'fallback', cheapest: this.pickCheapest() };
-  }
+import { loadConfig, type MadConfig } from '../config/loader.js';
+import { anthropicClient, geminiClient, openAiCompatClient } from './client.js';
+import type { ProviderClient } from './types.js';
+import { isLocalAgentInstalled, opencodeClient, piClient } from './local-agent.js';
+const execFileAsync = promisify(execFile);
+type ProviderName = 'groq' | 'claude' | 'gemini' | 'codex' | 'ollama' | 'opencode' | 'pi';
+interface ProviderMeta {
+    keyPrefixes: string[]; // platform env var prefixes used for auto-detect
+    keyEnv: string; // canonical env var
+    label: string;
+    isLocal?: boolean;
 }
-
-// ─── Singleton Instance ─────────────────────────────────────────────────────
-
-export const providerManager = new ProviderManager();
+const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
+    groq: { keyPrefixes: ['gsk_'], keyEnv: 'GROQ_API_KEY', label: 'Groq' },
+    claude: { keyPrefixes: ['sk-ant-'], keyEnv: 'ANTHROPIC_API_KEY', label: 'Anthropic' },
+    gemini: { keyPrefixes: ['AI'], keyEnv: 'GEMINI_API_KEY', label: 'Gemini' },
+    codex: { keyPrefixes: ['sk-'], keyEnv: 'OPENAI_API_KEY', label: 'OpenAI (codex)' },
+    ollama: { keyPrefixes: [], keyEnv: '', label: 'Ollama', isLocal: true },
+    opencode: { keyPrefixes: [], keyEnv: '', label: 'OpenCode CLI', isLocal: true },
+    pi: { keyPrefixes: [], keyEnv: '', label: 'Pi CLI', isLocal: true },
+};
+const DEFAULT_MODELS: Record<ProviderName, string> = {
+    groq: 'llama-3.3-70b-versatile',
+    claude: 'claude-sonnet-4-5',
+    gemini: 'gemini-2.5-flash',
+    codex: 'gpt-5-mini',
+    ollama: 'auto (installed model)',
+    opencode: 'opencode/glm-5.3-flash-free',
+    pi: 'default',
+};
+const PROVIDER_MODEL_LISTS: Record<ProviderName, string[]> = {
+    groq: [
+        'llama-3.3-70b-versatile',
+        'llama-3.1-8b-instant',
+        'llama3-70b-8192',
+        'qwen/qwen3-32b',
+        'deepseek-r1-distill-llama-70b',
+        'meta-llama/llama-4-scout-17b-16e-instruct',
+        'meta-llama/llama-4-maverick-17b-128e-instruct',
+        'openai/gpt-oss-120b',
+        'openai/gpt-oss-20b',
+        'moonshotai/kimi-k2-instruct',
+    ],
+    claude: [
+        'claude-sonnet-4-5',
+        'claude-opus-4-1',
+        'claude-3-7-sonnet-latest',
+        'claude-3-5-haiku-latest',
+    ],
+    gemini: [
+        'gemini-2.5-flash',
+        'gemini-2.5-pro',
+        'gemini-2.5-flash-lite',
+        'gemini-2.0-flash',
+    ],
+    codex: [
+        'gpt-5-mini',
+        'gpt-5',
+        'gpt-4.1',
+        'o4-mini',
+    ],
+    ollama: [],
+    opencode: [],
+    pi: [],
+};
+const PROVIDER_ORDER: ProviderName[] = ['opencode', 'pi', 'groq', 'claude', 'gemini', 'codex', 'ollama'];
+interface StoreShape {
+    keys: Record<string, string>;
+    models: Record<string, string>;
+}
+const store = new Conf<StoreShape>({
+    projectName: 'mad-harness',
+    ...(process.env.MAD_HOME ? { cwd: process.env.MAD_HOME, configName: 'credentials' } : {}),
+    defaults: { keys: {}, models: {} },
+});
+function readEnvKey(name: ProviderName): string | undefined {
+    const meta = PROVIDER_META[name];
+    if (!meta.keyEnv)
+        return undefined;
+    return process.env[meta.keyEnv] || undefined;
+}
+function storedKey(name: ProviderName): string | undefined {
+    const key = (store.get('keys') as Record<string, string>)[name];
+    return typeof key === 'string' && key.length > 0 ? key : readEnvKey(name);
+}
+function modelFor(name: ProviderName): string {
+    const configured = (store.get('models') as Record<string, string>)[name];
+    return typeof configured === 'string' && configured ? configured : DEFAULT_MODELS[name];
+}
+/** Build a live client bound to current config; throw if unusable. */
+export function buildProviderClient(name: string, opts: {
+    allowDisabled?: boolean;
+    model?: string;
+    config?: MadConfig;
+} = {}): ProviderClient {
+    const meta = PROVIDER_META[name as ProviderName];
+    if (!meta)
+        throw new Error(`Unknown provider: ${name}`);
+    if (!opts.allowDisabled && !isProviderEnabled(name, opts.config)) {
+        throw new Error(`Provider ${name} is disabled (enable with /config)`);
+    }
+    switch (name as ProviderName) {
+        case 'groq':
+            return openAiCompatClient({
+                name,
+                baseUrl: () => 'https://api.groq.com/openai/v1',
+                key: () => storedKey('groq'),
+                models: PROVIDER_MODEL_LISTS.groq,
+                defaultModel: () => (opts.model ?? modelFor('groq')),
+            });
+        case 'codex':
+            return openAiCompatClient({
+                name,
+                baseUrl: () => 'https://api.openai.com/v1',
+                key: () => storedKey('codex'),
+                models: PROVIDER_MODEL_LISTS.codex,
+                defaultModel: () => (opts.model ?? modelFor('codex')),
+            });
+        case 'ollama':
+            return nativeOllamaClient({host:opts.config?.ollamaHost||undefined,model:opts.model??(store.get('models') as Record<string,string>).ollama});
+        case 'claude':
+            return anthropicClient({
+                name,
+                key: () => storedKey('claude'),
+                models: PROVIDER_MODEL_LISTS.claude,
+                defaultModel: () => (opts.model ?? modelFor('claude')),
+            });
+        case 'gemini':
+            return geminiClient({
+                name,
+                key: () => storedKey('gemini') ?? process.env.GOOGLE_API_KEY,
+                models: PROVIDER_MODEL_LISTS.gemini,
+                defaultModel: () => (opts.model ?? modelFor('gemini')),
+            });
+        case 'opencode':
+            if (opts.model && !/^[^/]+\/.+/.test(opts.model))
+                throw new Error('OpenCode models must use provider/model format');
+            return opencodeClient(() => (opts.model ?? modelFor('opencode')), Boolean(opts.model));
+        case 'pi':
+            return piClient(() => (opts.model ?? modelFor('pi')));
+    }
+    throw new Error(`No client for ${name}`);
+}
+export function isProviderEnabled(name: string, config = loadConfig().config): boolean {
+    return config.enabledProviders.includes(name);
+}
+let enabledCache: ProviderName[] | null = null;
+function cachedEnabled(): ProviderName[] {
+    if (!enabledCache)
+        enabledCache = PROVIDER_ORDER.filter((name) => providerAvailable(name));
+    return enabledCache;
+}
+export function providerAvailable(name: string): boolean {
+    const meta = PROVIDER_META[name as ProviderName];
+    if (!meta)
+        return false;
+    if(name==='ollama') return true; // Reachability is probed asynchronously by initialize().
+    if (meta.isLocal)
+        return isLocalAgentInstalled(name as 'opencode' | 'pi');
+    return Boolean(storedKey(name as ProviderName));
+}
+export function resetEnabledCache(): void {
+    enabledCache = null;
+}
+export const PROVIDERS = {
+    order: PROVIDER_ORDER,
+    meta: PROVIDER_META,
+    models: PROVIDER_MODEL_LISTS,
+};
+export function listProviders(config: MadConfig = loadConfig().config): Array<{
+    name: ProviderName;
+    label: string;
+    available: boolean;
+    enabled: boolean;
+    model: string;
+    keySource: 'env' | 'config' | 'none';
+}> {
+    return PROVIDER_ORDER.map((name) => {
+        const envKey = readEnvKey(name);
+        const configKey = (store.get('keys') as Record<string, string>)[name];
+        return {
+            name,
+            label: PROVIDER_META[name].label,
+            available: providerAvailable(name),
+            enabled: isProviderEnabled(name, config),
+            model: name === config.defaultProvider && config.defaultModel ? config.defaultModel : modelFor(name),
+            keySource: envKey ? 'env' : configKey ? 'config' : 'none',
+        };
+    });
+}
+export function providerStatusLine(): string {
+    const rows = listProviders();
+    return rows.map((row) => `${row.enabled ? '●' : '○'} ${row.label} (${row.model})`).join(' · ');
+}
+export function setKey(name: string, key: string): void {
+    const keys = { ...(store.get('keys') as Record<string, string>) };
+    keys[name] = key;
+    store.set('keys', keys);
+    resetEnabledCache();
+}
+export function clearKey(name: string): void {
+    const keys = { ...(store.get('keys') as Record<string, string>) };
+    delete keys[name];
+    store.set('keys', keys);
+    resetEnabledCache();
+}
+export function detectKey(raw: string): ProviderName | null {
+    const prefixed = PROVIDER_ORDER.find((name) => PROVIDER_META[name].keyPrefixes.some((prefix) => raw.startsWith(prefix)));
+    if (prefixed)
+        return prefixed;
+    if (raw.includes('generativelanguage') || raw.startsWith('AI') && raw.length > 30)
+        return 'gemini';
+    return null;
+}
+// ─── Fallback chain (fallback includes local agents) ────────────────────────
+/** Ordered fallback chain: defaultProvider first, then every other usable provider. */
+export function fallbackChain(cfg: MadConfig): ProviderName[] {
+    const candidates: ProviderName[] = [];
+    const push = (name: ProviderName) => {
+        if (!cfg.enabledProviders.includes(name) || !providerAvailable(name) || candidates.includes(name))
+            return;
+        candidates.push(name);
+    };
+    if (cfg.defaultProvider)
+        push(cfg.defaultProvider as ProviderName);
+    for (const name of cfg.fallbackChain)
+        push(name as ProviderName);
+    return candidates;
+}
+// ─── Local CLI extras: list imported models ─────────────────────────────────
+export async function importOpenCodeModels(): Promise<string[]> {
+    try {
+        const { stdout } = await execFileAsync('opencode', ['models'], { timeout: 3000, maxBuffer: 1024 * 1024 });
+        return stdout.split('\n').map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+    }
+    catch {
+        return [];
+    }
+}
+export type { ProviderName };
+export { modelFor as getModelFor, storedKey as getStoredKey };
