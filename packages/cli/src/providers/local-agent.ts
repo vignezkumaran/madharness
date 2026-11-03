@@ -148,6 +148,7 @@ function isOpenCodeLimitError(chunk: string): boolean {
 }
 export function opencodeClient(configuredModel: () => string, exactModel = false): ProviderClient {
     const events = new OpenCodeEvents(minimalOpenCodeConfig);
+    let actualModel = configuredModel();
     async function chat(req: LlmRequest, stream: boolean, onDelta: StreamFn): Promise<LlmResult> {
         const override = process.env.MAD_OPENCODE_MODEL?.trim();
         const configured = configuredModel() !== 'default' ? configuredModel() : undefined;
@@ -162,6 +163,7 @@ export function opencodeClient(configuredModel: () => string, exactModel = false
             const content = attempt.content.trim();
             if (content) {
                 lastGoodOpenCodeModel = model;
+                actualModel = model;
                 return {
                     text: content,
                     toolCalls: [],
@@ -182,7 +184,7 @@ export function opencodeClient(configuredModel: () => string, exactModel = false
         close: () => events.close(),
         streaming: true,
         hasKey: () => isLocalAgentInstalled('opencode'),
-        defaultModel: () => configuredModel() || lastGoodOpenCodeModel || OPENCODE_FALLBACK_MODELS[0],
+        defaultModel: () => actualModel || configuredModel() || lastGoodOpenCodeModel || OPENCODE_FALLBACK_MODELS[0],
         models: OPENCODE_FALLBACK_MODELS.slice(0, 4),
         complete: (req) => chat(req, false, () => { }),
         stream: async (req, onDelta) => {
@@ -195,6 +197,7 @@ export function opencodeClient(configuredModel: () => string, exactModel = false
                 try {
                     const result = await events.stream(req, model, text => { emitted = true; onDelta(text, null); });
                     lastGoodOpenCodeModel = model;
+                    actualModel = model;
                     return result;
                 }
                 catch (error) {

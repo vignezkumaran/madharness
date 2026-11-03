@@ -204,6 +204,7 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
                         entry('system', event.summary, 'Compacted');
                         break;
                     case 'token-usage':
+                        next.model = session.sessionModel();
                         next.tokens = event.input + event.output;
                         next.turnTokens = next.tokens - next.turnTokenBaseline;
                         next.usageEstimated = event.estimated ?? false;
