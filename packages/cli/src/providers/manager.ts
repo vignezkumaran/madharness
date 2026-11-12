@@ -8,7 +8,7 @@ import { anthropicClient, geminiClient, openAiCompatClient } from './client.js';
 import type { ProviderClient } from './types.js';
 import { isLocalAgentInstalled, opencodeClient, piClient } from './local-agent.js';
 const execFileAsync = promisify(execFile);
-type ProviderName = 'groq' | 'claude' | 'gemini' | 'codex' | 'ollama' | 'opencode' | 'pi';
+type ProviderName = 'groq' | 'claude' | 'gemini' | 'codex' | 'openrouter' | 'ollama' | 'opencode' | 'pi';
 interface ProviderMeta {
     keyPrefixes: string[]; // platform env var prefixes used for auto-detect
     keyEnv: string; // canonical env var
@@ -19,6 +19,7 @@ const PROVIDER_META: Record<ProviderName, ProviderMeta> = {
     groq: { keyPrefixes: ['gsk_'], keyEnv: 'GROQ_API_KEY', label: 'Groq' },
     claude: { keyPrefixes: ['sk-ant-'], keyEnv: 'ANTHROPIC_API_KEY', label: 'Anthropic' },
     gemini: { keyPrefixes: ['AI'], keyEnv: 'GEMINI_API_KEY', label: 'Gemini' },
+    openrouter: { keyPrefixes: ['sk-or-'], keyEnv: 'OPENROUTER_API_KEY', label: 'OpenRouter' },
     codex: { keyPrefixes: ['sk-'], keyEnv: 'OPENAI_API_KEY', label: 'OpenAI (codex)' },
     ollama: { keyPrefixes: [], keyEnv: '', label: 'Ollama', isLocal: true },
     opencode: { keyPrefixes: [], keyEnv: '', label: 'OpenCode CLI', isLocal: true },
@@ -28,6 +29,7 @@ const DEFAULT_MODELS: Record<ProviderName, string> = {
     groq: 'llama-3.3-70b-versatile',
     claude: 'claude-sonnet-4-5',
     gemini: 'gemini-2.5-flash',
+    openrouter: 'anthropic/claude-3.7-sonnet',
     codex: 'gpt-5-mini',
     ollama: 'auto (installed model)',
     opencode: 'opencode/glm-5.3-flash-free',
@@ -58,6 +60,19 @@ const PROVIDER_MODEL_LISTS: Record<ProviderName, string[]> = {
         'gemini-2.5-flash-lite',
         'gemini-2.0-flash',
     ],
+    openrouter: [
+        'anthropic/claude-3.7-sonnet',
+        'anthropic/claude-3.5-sonnet',
+        'openai/gpt-4o',
+        'openai/gpt-4o-mini',
+        'google/gemini-2.5-flash',
+        'google/gemini-2.5-pro',
+        'deepseek/deepseek-r1',
+        'deepseek/deepseek-chat',
+        'meta-llama/llama-3.3-70b-instruct',
+        'qwen/qwen-2.5-coder-32b-instruct',
+        'mistralai/mistral-large-2411',
+    ],
     codex: [
         'gpt-5-mini',
         'gpt-5',
@@ -68,7 +83,7 @@ const PROVIDER_MODEL_LISTS: Record<ProviderName, string[]> = {
     opencode: [],
     pi: [],
 };
-const PROVIDER_ORDER: ProviderName[] = ['opencode', 'pi', 'groq', 'claude', 'gemini', 'codex', 'ollama'];
+const PROVIDER_ORDER: ProviderName[] = ['opencode', 'pi', 'groq', 'claude', 'gemini', 'openrouter', 'codex', 'ollama'];
 interface StoreShape {
     keys: Record<string, string>;
     models: Record<string, string>;
@@ -120,6 +135,14 @@ export function buildProviderClient(name: string, opts: {
                 key: () => storedKey('codex'),
                 models: PROVIDER_MODEL_LISTS.codex,
                 defaultModel: () => (opts.model ?? modelFor('codex')),
+            });
+        case 'openrouter':
+            return openAiCompatClient({
+                name,
+                baseUrl: () => 'https://openrouter.ai/api/v1',
+                key: () => storedKey('openrouter'),
+                models: PROVIDER_MODEL_LISTS.openrouter,
+                defaultModel: () => (opts.model ?? modelFor('openrouter')),
             });
         case 'ollama':
             return nativeOllamaClient({host:opts.config?.ollamaHost||undefined,model:opts.model??(store.get('models') as Record<string,string>).ollama});
@@ -210,10 +233,13 @@ export function clearKey(name: string): void {
     resetEnabledCache();
 }
 export function detectKey(raw: string): ProviderName | null {
-    const prefixed = PROVIDER_ORDER.find((name) => PROVIDER_META[name].keyPrefixes.some((prefix) => raw.startsWith(prefix)));
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('sk-or-') || trimmed.startsWith('sk-or-v1-'))
+        return 'openrouter';
+    const prefixed = PROVIDER_ORDER.find((name) => PROVIDER_META[name].keyPrefixes.some((prefix) => trimmed.startsWith(prefix)));
     if (prefixed)
         return prefixed;
-    if (raw.includes('generativelanguage') || raw.startsWith('AI') && raw.length > 30)
+    if (trimmed.includes('generativelanguage') || trimmed.startsWith('AI') && trimmed.length > 30)
         return 'gemini';
     return null;
 }

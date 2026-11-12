@@ -35,7 +35,7 @@ export const DEFAULT_CONFIG: MadConfig = {
     defaultProvider: 'opencode',
     defaultModel: '',
     ollamaHost:'',
-    fallbackChain: ['opencode', 'pi', 'groq', 'claude', 'gemini', 'codex'],
+    fallbackChain: ['opencode', 'pi', 'groq', 'claude', 'gemini', 'openrouter', 'codex'],
     approvalPolicy: 'on-request',
     enabledProviders: ['opencode', 'pi'],
     mcpServers: {},
@@ -107,8 +107,8 @@ export function loadConfig(cliOverrides: Partial<MadConfig> = {}, workspace = pr
     }
     return { config: merged as MadConfig, layers: applied };
 }
-export function saveConfig(partial: Partial<MadConfig>, scope: 'user' | 'project' = 'user'): MadConfig {
-    const file = scope === 'user' ? USER_CONFIG() : PROJECT_CONFIG();
+export function saveConfig(partial: Partial<MadConfig>, scope: 'user' | 'project' = 'user', workspace = process.cwd()): MadConfig {
+    const file = scope === 'user' ? USER_CONFIG() : PROJECT_CONFIG(workspace);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const existing = readLayer(file);
     const updated = { ...existing, ...partial };

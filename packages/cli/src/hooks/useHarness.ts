@@ -8,17 +8,18 @@ import * as path from 'path';
 import { MadSession } from '../session/session.js';
 import { loadConfig } from '../config/loader.js';
 import { listSessions } from '../rollout/store.js';
-import { listProviders, setKey, detectKey, clearKey, PROVIDERS, importOpenCodeModels } from '../providers/manager.js';
+import { listProviders, setKey, detectKey, clearKey, PROVIDERS, importOpenCodeModels, providerAvailable } from '../providers/manager.js';
 import type { ProviderName } from '../providers/manager.js';
 import type { AgentRole, ReviewDecision, Event, DagNodeInfo } from '../protocol/types.js';
 import { distillSource } from '../agent/distill.js';
+import { parseMcpAddInput, MCP_PRESETS } from '../mcp/presets.js';
 export interface TranscriptEntry {
     id: string;
     kind: 'user' | 'assistant' | 'system' | 'error' | 'tool' | 'agent' | 'bus' | 'diff';
     title?: string;
     content: string;
     meta?: string;
-    status?: 'ok' | 'error';
+    status?: 'ok' | 'error' | 'running';
     at: number;
 }
 export interface AgentView {
@@ -42,16 +43,17 @@ export interface PickerItem {
     detail?: string;
     status?: PickerStatus;
     action: {
-        type: 'provider' | 'model' | 'agent' | 'role' | 'permissions';
+        type: 'provider' | 'model' | 'agent' | 'role' | 'permissions' | 'mcp';
         access?: 'ask' | 'full';
         provider?: string;
         model?: string;
         agentId?: string;
         role?: AgentRole;
+        mcpServer?: string;
     };
 }
 export interface PickerState {
-    kind: 'providers' | 'models' | 'agents' | 'permissions';
+    kind: 'providers' | 'models' | 'agents' | 'permissions' | 'mcp';
     title: string;
     subtitle?: string;
     empty?: string;
@@ -114,7 +116,7 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
     const approval = approvals[0];
     const addSystem = (content: string, title = 'MAD') => set(s => ({ ...s, entries: [...s.entries, { id: crypto.randomUUID(), kind: 'system', content, title, at: Date.now() }] }));
     useEffect(() => {
-        addSystem('Describe a task or ask a question. /agent <name> [role] creates an agent; /task <name> <task> assigns work; /agents [name] inspects agents. Tasks run directly. /plan <task> plans without executing; /run executes that plan. /permissions changes access mode. /resume lists saved sessions.');
+        addSystem('Describe a task or ask a question. /agent <name> [role] creates an agent; /task <name> <task> assigns work; /mcp connects MCP servers (Jira, GitHub); /plan <task> plans; /run executes that plan. /permissions changes access mode. /resume lists saved sessions.');
         let pendingDelta = '';
         let deltaTimer: ReturnType<typeof setTimeout> | undefined;
         const clearDelta = () => {
@@ -153,8 +155,8 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
             }
             set(s => {
                 const next = { ...s };
-                const entry = (kind: TranscriptEntry['kind'], content: string, title?: string) => { next.entries = [...next.entries, { id: crypto.randomUUID(), kind, content, title, at: Date.now() }]; };
-                const log = (text: string) => { next.agentLog = [...next.agentLog, text].slice(-30); };
+                const entry = (kind: TranscriptEntry['kind'], content: string, title?: string, status?: TranscriptEntry['status']) => { next.entries = [...next.entries, { id: crypto.randomUUID(), kind, content, title, status, at: Date.now() }]; };
+                const log = (text: string) => { next.agentLog = [...next.agentLog, `[${new Date().toLocaleTimeString('en-GB')}] ${text}`].slice(-30); };
                 switch (event.kind) {
                     case 'turn-started':
                         next.turnActive = true;
@@ -190,16 +192,22 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
                             if (agent) next.agents = { ...next.agents, [event.agent]: { ...agent, current: event.brief } };
                             log(`${event.agent}: ${event.brief}`);
                         } else next.phase = `Tool calling · ${event.tool}: ${event.brief}`;
-                        entry('tool', `Running: ${event.brief}`, event.agent ? `${event.agent} · ${event.tool}` : event.tool);
+                        entry('tool', event.brief, event.agent ? `${event.agent} · ${event.tool}` : event.tool, 'running');
                         break;
-                    case 'tool-completed':
-                        entry('tool', `${event.brief}${event.detail ? '\n' + event.detail : ''}`, event.agent ? `${event.agent} · ${event.tool}` : event.tool);
+                    case 'tool-completed': {
+                        const title = event.agent ? `${event.agent} · ${event.tool}` : event.tool;
+                        const content = `${event.brief}${event.detail ? '\n' + event.detail : ''}`;
+                        const status = event.ok ? 'ok' : 'error';
+                        const pending = [...next.entries].reverse().find(item => item.kind === 'tool' && item.title === title && item.content === event.brief && item.status === 'running');
+                        if (!pending) entry('tool', content, title, status);
+                        else next.entries = next.entries.map(item => item === pending ? { ...item, content, status } : item);
                         if (event.agent) {
                             const agent = next.agents[event.agent];
                             if (agent) next.agents = { ...next.agents, [event.agent]: { ...agent, current: event.ok ? 'Thinking about result' : 'Tool failed' } };
                             log(`${event.agent}: ${event.ok ? 'finished' : 'failed'} ${event.brief}`);
                         } else next.phase = 'Processing tool result';
                         break;
+                    }
                     case 'compacted':
                         entry('system', event.summary, 'Compacted');
                         break;
@@ -215,7 +223,8 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
                         next.agentOrder = [...new Set([...next.agentOrder, event.name])];
                         break;
                     case 'agent-status': {
-                        entry('system',`${event.name}: ${event.status}`,'Agent status');
+                        entry('system', event.detail ?? event.status, `${event.name} · ${event.status}`);
+                        log(`${event.name} · ${event.status}`);
                         if (!next.turnActive && event.status === 'working') next.phase = `Thinking · ${event.name}`;
                         const agent = next.agents[event.name];
                         if (agent)
@@ -237,6 +246,7 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
                         break;
                     }
                     case 'dag-finished':
+                        entry('agent', event.summary, event.ok ? 'Workflow complete' : 'Workflow incomplete', event.ok ? 'ok' : 'error');
                         if (next.dag)
                             next.dag = { ...next.dag, label: event.summary, failed: !event.ok, finished: true };
                         break;
@@ -261,11 +271,24 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
             else if (item.action.agentId)
                 inspectAgent(item.action.agentId);
             else if (item.action.provider) {
-                await session.selectProvider(item.action.provider,item.action.model);
+                const prov = item.action.provider as ProviderName;
+                if (!providerAvailable(prov)) {
+                    set(s => ({ ...s, awaitingProvider: prov, awaitingKey: true }));
+                    addSystem(`Paste your ${PROVIDERS.meta[prov]?.label ?? prov} API key below:`, `${PROVIDERS.meta[prov]?.label ?? prov} Login`);
+                    return;
+                }
+                await session.selectProvider(item.action.provider, item.action.model);
                 set(s => ({ ...s, provider: item.action.provider as ProviderName, model: session.sessionModel() }));
             }
             else if (item.action.role)
                 inspectRole(item.action.role);
+            else if (item.action.type === 'mcp' && item.action.mcpServer) {
+                const serverName = item.action.mcpServer;
+                const tools = await session.listMcpTools(serverName);
+                const serverInfo = session.listMcpServers().find(s => s.name === serverName);
+                const toolList = tools.map(t => `  • ${t.tool.name}: ${t.tool.description ?? 'No description'}`).join('\n') || '  No tools reported.';
+                addSystem(`MCP Server: ${serverName}\nStatus: ${serverInfo?.connected ? 'connected' : 'offline'}\nCommand: ${serverInfo?.config.command} ${(serverInfo?.config.args ?? []).join(' ')}\n\nTools (${tools.length}):\n${toolList}\n\nTo remove: /mcp remove ${serverName}`, `MCP: ${serverName}`);
+            }
         }
         catch (error) {
             addSystem((error as Error).message, 'Error');
@@ -287,7 +310,15 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
                 setKey(provider,input);
                 await session.selectProvider(provider);
                 set(s=>({...s,provider,model:session.sessionModel(),awaitingKey:false,awaitingProvider:null}));
-                addSystem(`Connected ${provider}.`);
+                addSystem(`Connected ${PROVIDERS.meta[provider]?.label ?? provider}. Model: ${session.sessionModel()}`);
+                return;
+            }
+            const detectedDirect = detectKey(input);
+            if (!input.startsWith('/') && detectedDirect && (!input.includes(' ') || input.startsWith('sk-or-') || input.startsWith('sk-ant-') || input.startsWith('gsk_'))) {
+                setKey(detectedDirect, input);
+                await session.selectProvider(detectedDirect);
+                set(s => ({ ...s, provider: detectedDirect, model: session.sessionModel(), awaitingKey: false, awaitingProvider: null }));
+                addSystem(`Connected ${PROVIDERS.meta[detectedDirect]?.label ?? detectedDirect} from pasted token. Model: ${session.sessionModel()}`, 'Provider Connected');
                 return;
             }
             set(s => ({ ...s, history: [...s.history, input].slice(-200) }));
@@ -338,8 +369,98 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
                     break;
                 }
                 case 'help':
-                    addSystem('/agent <name> [role] · /task <name> <task> · /agents [name] · /stop <name> · /plan <task> · /run · /permissions · /dag · /resume [id] · /compact · /clear · /providers · /models · /model <provider> [model] · /login [provider] · /logout <provider> · /status · /diff · /distill <file> · /cancel');
+                    addSystem('/agent <name> [role] · /task <name> <task> · /mcp [add|list|tools|remove] · /agents [name] · /stop <name> · /plan <task> · /run · /permissions · /dag · /resume [id] · /compact · /clear · /providers · /models · /model <provider> [model] · /login [provider] · /logout <provider> · /status · /diff · /distill <file> · /cancel');
                     break;
+                case 'mcp': {
+                    const [subcmd, ...subargs] = args;
+                    const sub = (subcmd || '').toLowerCase();
+                    if (!sub || sub === 'list' || sub === 'status') {
+                        const servers = session.listMcpServers();
+                        if (servers.length === 0) {
+                            addSystem(
+                                'No MCP servers configured yet.\n\n' +
+                                'Connect services like GitHub, Jira, Git, or custom tools via MCP:\n\n' +
+                                '  /mcp add github GITHUB_PERSONAL_ACCESS_TOKEN=<token>\n' +
+                                '  /mcp add jira npx -y @atlassian/jira-mcp-server --env JIRA_URL=<url> --env JIRA_EMAIL=<email> --env JIRA_API_TOKEN=<token>\n' +
+                                '  /mcp presets (view all copy-paste ready presets)\n' +
+                                '  /mcp add <name> <command> [args...] [--env KEY=VAL]',
+                                'MCP (Model Context Protocol)'
+                            );
+                            break;
+                        }
+                        const lines = servers.map(s => `  ${s.connected ? '●' : '○'} ${s.name}: ${s.config.command} ${(s.config.args ?? []).join(' ')} (${s.connected ? 'connected' : 'offline'} · ${s.toolsCount} tools)`);
+                        addSystem(
+                            `Configured MCP servers:\n${lines.join('\n')}\n\n` +
+                            'Commands:\n' +
+                            '  /mcp add <name> <cmd> [args...] [--env KEY=VAL]\n' +
+                            '  /mcp tools [server]\n' +
+                            '  /mcp remove <name>\n' +
+                            '  /mcp presets',
+                            'MCP Servers'
+                        );
+                        set(s => ({
+                            ...s,
+                            picker: {
+                                kind: 'mcp',
+                                title: 'MCP Servers',
+                                subtitle: 'Select a server to view its tools and configuration.',
+                                items: servers.map(srv => ({
+                                    id: srv.name,
+                                    label: srv.name,
+                                    meta: `${srv.connected ? 'connected' : 'offline'} · ${srv.toolsCount} tools`,
+                                    detail: `${srv.config.command} ${(srv.config.args ?? []).join(' ')}`,
+                                    status: srv.connected ? 'connected' : 'offline',
+                                    action: { type: 'mcp', mcpServer: srv.name }
+                                }))
+                            }
+                        }));
+                        break;
+                    }
+                    if (sub === 'presets') {
+                        const presetList = Object.values(MCP_PRESETS).map(p =>
+                            `• ${p.name.toUpperCase()}: ${p.description}\n  ${p.sampleCommand}${p.envHelp ? `\n  (${p.envHelp})` : ''}`
+                        ).join('\n\n');
+                        addSystem(`Available MCP presets:\n\n${presetList}`, 'MCP Presets');
+                        break;
+                    }
+                    if (sub === 'tools') {
+                        const targetServer = subargs[0];
+                        const tools = await session.listMcpTools(targetServer);
+                        if (tools.length === 0) {
+                            addSystem(targetServer ? `No tools found for MCP server '${targetServer}'.` : 'No MCP tools discovered. Ensure servers are connected.', 'MCP Tools');
+                            break;
+                        }
+                        const list = tools.map(t => `• [${t.server}] ${t.tool.name}: ${t.tool.description ?? 'No description'}`).join('\n');
+                        addSystem(`Discovered MCP tools (${tools.length}):\n\n${list}`, 'MCP Tools');
+                        break;
+                    }
+                    if (sub === 'remove' || sub === 'rm' || sub === 'delete') {
+                        const target = subargs[0];
+                        if (!target) throw new Error('Usage: /mcp remove <server-name>');
+                        await session.removeMcpServer(target);
+                        addSystem(`Removed MCP server '${target}'.`, 'MCP');
+                        break;
+                    }
+                    if (sub === 'add') {
+                        if (subargs.length === 0) {
+                            throw new Error('Usage: /mcp add <name> [command] [args...] [--env KEY=VAL]\nType /mcp presets to see examples.');
+                        }
+                        const parsed = parseMcpAddInput(subargs);
+                        addSystem(`Connecting to MCP server '${parsed.name}'...`, 'MCP');
+                        const result = await session.addMcpServer(parsed.name, {
+                            command: parsed.command,
+                            args: parsed.args,
+                            env: parsed.env,
+                            enabled: true
+                        });
+                        const toolSummary = result.tools.length > 0
+                            ? `\nTools available (${result.toolsCount}): ${result.tools.slice(0, 8).join(', ')}${result.tools.length > 8 ? ` (+${result.tools.length - 8} more)` : ''}`
+                            : '\n(No tools reported yet)';
+                        addSystem(`Connected MCP server '${parsed.name}'.${toolSummary}\nSaved to project config.`, 'MCP Connected');
+                        break;
+                    }
+                    throw new Error(`Unknown /mcp subcommand: ${sub}. Try: /mcp, /mcp add, /mcp remove, /mcp tools, /mcp presets.`);
+                }
                 case 'agent': {
                     const [name, role, ...task] = args;
                     if (!name)
@@ -400,6 +521,35 @@ export function useHarness(initialAccess?: 'ask' | 'full') {
                         throw new Error('Session not found. Use /resume to list sessions.');
                     await session.startRolloutIfNeeded(`Resume ${rest}`);
                     session.resume(match.file);
+                    break;
+                }
+                case 'openrouter': {
+                    if (rest) {
+                        if (rest.startsWith('sk-or-') || rest.startsWith('sk-or-v1-')) {
+                            setKey('openrouter', rest);
+                            await session.selectProvider('openrouter');
+                            set(s => ({ ...s, provider: 'openrouter', model: session.sessionModel() }));
+                            addSystem(`Connected OpenRouter. Model: ${session.sessionModel()}`, 'OpenRouter');
+                            break;
+                        }
+                        if (!providerAvailable('openrouter')) {
+                            set(s => ({ ...s, awaitingProvider: 'openrouter', awaitingKey: true }));
+                            addSystem('OpenRouter requires an API key. Paste your token (sk-or-v1-...) below:', 'OpenRouter Login');
+                            break;
+                        }
+                        await session.selectProvider('openrouter', rest);
+                        set(s => ({ ...s, provider: 'openrouter', model: session.sessionModel() }));
+                        addSystem(`Switched OpenRouter model to ${session.sessionModel()}`, 'OpenRouter');
+                        break;
+                    }
+                    if (providerAvailable('openrouter')) {
+                        await session.selectProvider('openrouter');
+                        set(s => ({ ...s, provider: 'openrouter', model: session.sessionModel() }));
+                        addSystem(`Switched provider to OpenRouter. Model: ${session.sessionModel()}`, 'OpenRouter');
+                        break;
+                    }
+                    set(s => ({ ...s, awaitingProvider: 'openrouter', awaitingKey: true }));
+                    addSystem('Paste your OpenRouter API key (sk-or-v1-...) below to connect:', 'OpenRouter Login');
                     break;
                 }
                 case 'ollama':

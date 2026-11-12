@@ -250,6 +250,11 @@ export class AgentManager {
                 fixRounds += 1;
             }
             this.options.emit({ kind: 'message-completed', text: summary, role: 'assistant', toolRuns: [] });
+            const taskResults = engine.allNodes.map(node => {
+                const result = node.result?.replace(/\s+/g, ' ').trim();
+                return `• ${registered.get(node.id) ?? node.id} · ${node.status} · ${node.title}${result ? ` — ${result.slice(0, 180)}` : ''}`;
+            });
+            summary = [summary, ...taskResults].join('\n');
             this.options.emit({ kind: 'dag-finished', ok, summary });
             return { ok, summary };
         }

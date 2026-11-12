@@ -41,25 +41,12 @@ export const HarnessEntry: React.FC<{ entry: TranscriptEntry }> = ({ entry }) =>
 
   if (entry.kind === 'tool') {
     const color = entry.status === 'error' ? THEME.danger : THEME.primary;
-    const icon = entry.status === 'error' ? '✖' : '●';
-    const [first, ...rest] = entry.content.split('\n');
+    const status = entry.status === 'error' ? '✖ Failed' : entry.status === 'running' ? '◐ Running' : '✓ Finished';
+    const time = new Date(entry.at).toLocaleTimeString('en-GB');
     return (
-      <Box flexDirection="column" marginBottom={0}>
-        <Box>
-          <Text color={THEME.textDim}>  </Text>
-          <Text color={color}>{icon} </Text>
-          <Text color={THEME.textMuted}>{entry.title}</Text>
-          <Text color={THEME.textDim}> · {first}</Text>
-        </Box>
-        {rest.length > 0 ? (
-          <Box paddingLeft={5} flexDirection="column">
-            {rest.map((line, index) => (
-              <Text key={index} color={entry.status === 'error' ? THEME.danger : THEME.textDim}>
-                {line}
-              </Text>
-            ))}
-          </Box>
-        ) : null}
+      <Box flexDirection="column" borderStyle="single" borderColor={color} paddingX={1}>
+        <Text color={color} bold>[{time}] {entry.title} · {status}</Text>
+        <Text color={THEME.textMuted}>{entry.content}</Text>
       </Box>
     );
   }
@@ -68,7 +55,7 @@ export const HarnessEntry: React.FC<{ entry: TranscriptEntry }> = ({ entry }) =>
     return (
       <Box flexDirection="column" marginBottom={1} paddingLeft={1} borderStyle="single" borderColor={THEME.borderDim} borderTop={false} borderRight={false} borderBottom={false}>
         <Box>
-          <Text color={THEME.primary} bold>✓ </Text>
+          <Text color={entry.status === 'error' ? THEME.danger : THEME.primary} bold>{entry.status === 'error' ? '✖ ' : entry.status === 'ok' ? '✓ ' : '◇ '}</Text>
           <Text color={THEME.accent} bold>{entry.title}</Text>
           {entry.meta ? <Text color={THEME.textDim}> · {entry.meta}</Text> : null}
         </Box>

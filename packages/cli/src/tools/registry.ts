@@ -41,6 +41,9 @@ export class ToolRegistry {
     names(): string[] {
         return Array.from(this.tools.keys());
     }
+    unregister(name: string): boolean {
+        return this.tools.delete(name);
+    }
     async execute(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> {
         const tool = this.tools.get(name);
         if (!tool)
@@ -66,7 +69,9 @@ export class ToolRegistry {
                 tool: name,
                 brief: describeCall(tool.spec, safeArgs),
                 ok: result.ok,
-                detail: result.denied ? 'denied' : undefined,
+                detail: result.denied ? 'Approval denied' : name === 'run_shell'
+                    ? result.output.trim().slice(-600) || undefined
+                    : undefined,
                 agent: ctx.agent,
             });
             void started;

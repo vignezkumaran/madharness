@@ -516,3 +516,66 @@ test('named workers use the shared sampling boundary for incremental human-reada
  const response=await sampleStep({client:fake,request:{system:'test',messages:[]},agent:'worker',streamId:'worker',emit:event=>{if(event.kind==='delta'&&event.text)deltas.push(event.text);}});
  assert.equal(deltas.join(''),'First\nSecond');assert.equal(response.usage?.estimated,true);
 });
+test('MCP parser and manager dynamically infuse, bridge and remove MCP servers', async () => {
+    const { parseMcpAddInput } = await import('../src/mcp/presets.js');
+    const parsedCustom = parseMcpAddInput(['custom', 'node', 'server.js', '--env', 'API_KEY=secret']);
+    assert.equal(parsedCustom.name, 'custom');
+    assert.equal(parsedCustom.command, 'node');
+    assert.deepEqual(parsedCustom.args, ['server.js']);
+    assert.equal(parsedCustom.env.API_KEY, 'secret');
+
+    const parsedPreset = parseMcpAddInput(['git']);
+    assert.equal(parsedPreset.name, 'git');
+    assert.equal(parsedPreset.command, 'uvx');
+
+    const serverScript = join(workspace, 'dynamic-mcp.cjs');
+    writeFileSync(serverScript, `const readline=require('readline');readline.createInterface({input:process.stdin}).on('line',line=>{const req=JSON.parse(line);if(!('id' in req))return;let result={};if(req.method==='initialize')result={protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'dynamic',version:'1'}};if(req.method==='tools/list')result={tools:[{name:'jira_search',description:'Search Jira issues',inputSchema:{type:'object',properties:{query:{type:'string'}}}}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:req.id,result})+'\\n');});`);
+
+    const { McpManager } = await import('../src/mcp/manager.js');
+    const { ToolRegistry } = await import('../src/tools/registry.js');
+    const mcp = new McpManager();
+    const registry = new ToolRegistry();
+
+    try {
+        const added = await mcp.addServer('jira', { command: process.execPath, args: [serverScript] }, () => {}, registry);
+        assert.equal(added.tools.length, 1);
+        assert.equal(added.tools[0].name, 'jira_search');
+        assert.equal(registry.listDeferred().length, 1);
+        const registered = registry.listDeferred()[0];
+        assert.match(registered.description, /Search Jira issues/);
+
+        const servers = mcp.listServers();
+        assert.equal(servers.length, 1);
+        assert.equal(servers[0].name, 'jira');
+        assert.equal(servers[0].connected, true);
+
+        const removed = mcp.removeServer('jira', registry);
+        assert.equal(removed, true);
+        assert.equal(registry.listDeferred().length, 0);
+        assert.equal(mcp.listServers().length, 0);
+    } finally {
+        mcp.stop();
+    }
+});
+test('OpenRouter is detected, registered and configured with default model', async () => {
+    const { detectKey, buildProviderClient, listProviders, setKey, clearKey } = await import('../src/providers/manager.js');
+    assert.equal(detectKey('sk-or-v1-abcdef1234567890'), 'openrouter');
+    assert.equal(detectKey('sk-or-some-token'), 'openrouter');
+    assert.equal(detectKey('sk-openai-key'), 'codex');
+
+    const providers = listProviders();
+    const openrouter = providers.find(p => p.name === 'openrouter');
+    assert.ok(openrouter);
+    assert.equal(openrouter.label, 'OpenRouter');
+    assert.equal(openrouter.model, 'anthropic/claude-3.7-sonnet');
+
+    setKey('openrouter', 'sk-or-v1-testkey');
+    try {
+        const client = buildProviderClient('openrouter', { allowDisabled: true });
+        assert.equal(client.name, 'openrouter');
+        assert.equal(client.hasKey(), true);
+        assert.equal(client.defaultModel(), 'anthropic/claude-3.7-sonnet');
+    } finally {
+        clearKey('openrouter');
+    }
+});

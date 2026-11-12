@@ -22,9 +22,10 @@ import { classifyRiskSafe } from './approval-bridge.js';
 import type { ApprovalRequestBrief } from '../tools/types.js';
 import { estimateTokens, UsageLedger } from '../tokens/estimator.js';
 import { RolloutRecorder } from '../rollout/recorder.js';
-import type { MadConfig } from '../config/loader.js';
+import { loadConfig, saveConfig, type MadConfig } from '../config/loader.js';
 import { replayResponseItems } from '../rollout/store.js';
 import { McpManager } from '../mcp/manager.js';
+import type { McpServerConfig, McpToolInfo } from '../mcp/client.js';
 import { budgetMessages, reserveTaskTokens } from '../tokens/budget.js';
 import { renderMessages } from '../providers/types.js';
 type Listener = (event: Event) => void;
@@ -637,6 +638,52 @@ export class MadSession {
     clearPermissions(): void { this.localApprovalStore.clear(); }
     providerLabel(): string {
         return this.providerName;
+    }
+    mcpManager(): McpManager {
+        return this.mcp;
+    }
+    async ensureToolsPrepared(): Promise<void> {
+        await this.prepareTools();
+    }
+    async addMcpServer(name: string, serverConfig: McpServerConfig, scope: 'user' | 'project' = 'project'): Promise<{ toolsCount: number; tools: string[] }> {
+        await this.prepareTools();
+        const result = await this.mcp.addServer(name, serverConfig, text => this.note(text), this.registry);
+        this.config.mcpServers = { ...this.config.mcpServers, [name]: serverConfig };
+        const currentSaved = loadConfig({}, this.workspace).config.mcpServers ?? {};
+        saveConfig({ mcpServers: { ...currentSaved, [name]: serverConfig } }, scope, this.workspace);
+        return {
+            toolsCount: result.tools.length,
+            tools: result.tools.map(t => t.name),
+        };
+    }
+    async removeMcpServer(name: string, scope: 'user' | 'project' = 'project'): Promise<boolean> {
+        await this.prepareTools();
+        const removed = this.mcp.removeServer(name, this.registry);
+        const { [name]: _, ...rest } = this.config.mcpServers ?? {};
+        this.config.mcpServers = rest;
+        const currentSaved = loadConfig({}, this.workspace).config.mcpServers ?? {};
+        const { [name]: __, ...savedRest } = currentSaved;
+        saveConfig({ mcpServers: savedRest }, scope, this.workspace);
+        return removed;
+    }
+    listMcpServers(): Array<{ name: string; config: McpServerConfig; connected: boolean; toolsCount: number }> {
+        const connectedServers = this.mcp.listServers();
+        const connectedMap = new Map(connectedServers.map(s => [s.name, s]));
+        const allNames = new Set([...Object.keys(this.config.mcpServers ?? {}), ...connectedMap.keys()]);
+        return Array.from(allNames).map(name => {
+            const conf = this.config.mcpServers?.[name] ?? { command: '' };
+            const conn = connectedMap.get(name);
+            return {
+                name,
+                config: conf,
+                connected: conn?.connected ?? false,
+                toolsCount: conn?.tools?.length ?? 0,
+            };
+        });
+    }
+    async listMcpTools(serverName?: string): Promise<Array<{ server: string; tool: McpToolInfo; registeredName?: string }>> {
+        await this.prepareTools();
+        return this.mcp.getTools(serverName);
     }
     private push(item: ResponseItem): void {
         this.context.push(item);

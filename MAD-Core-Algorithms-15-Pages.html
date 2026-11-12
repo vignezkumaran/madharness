@@ -1,0 +1,847 @@
+<!doctype html><html><head><meta charset="utf-8"><title>MAD Core Algorithms</title><style>@page{size:A4;margin:12mm}*{box-sizing:border-box}body{margin:0;color:#111;background:white}.page{break-after:page;page-break-after:always}.page:last-child{break-after:auto;page-break-after:auto}pre{font:8pt/10pt monospace;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}.number{font:8pt sans-serif;text-align:right;margin-bottom:4pt}@media screen{body{background:#ddd}.page{width:210mm;min-height:297mm;margin:10px auto;padding:12mm;background:white;box-shadow:0 1px 5px #999}}</style></head><body><section class="page"><div class="number">1 / 14</div><pre>
+## AST pruning
+
+packages/cli/src/ast/tree-sitter-pruner.ts
+
+import { createRequire } from &#x27;module&#x27;;
+import * as path from &#x27;path&#x27;;
+
+interface TsNode {
+  type: string;
+  text: string;
+  startIndex: number;
+  endIndex: number;
+  startPosition: { row: number; column: number };
+  childForFieldName(name: string): TsNode | null;
+  namedChildren: TsNode[];
+}
+
+interface TsLanguage {
+  typescript: unknown;
+  tsx: unknown;
+}
+
+interface TsParser {
+  setLanguage(language: unknown): void;
+  parse(source: string): { rootNode: TsNode };
+}
+
+interface Grammars {
+  Parser: new () =&gt; TsParser;
+  Python: unknown;
+  TypeScript: TsLanguage;
+}
+
+let grammars: Grammars | null | undefined;
+
+function loadGrammars(): Grammars | null {
+  if (grammars !== undefined) return grammars;
+  try {
+    const require = createRequire(import.meta.url);
+    grammars = {
+      Parser: require(&#x27;tree-sitter&#x27;) as new () =&gt; TsParser,
+      Python: require(&#x27;tree-sitter-python&#x27;),
+      TypeScript: require(&#x27;tree-sitter-typescript&#x27;) as TsLanguage,
+    };
+  } catch {
+    grammars = null;
+  }
+  return grammars;
+}
+
+export interface TreeSitterContract {
+  content: string;
+  language: string;
+  classes: string[];
+  functions: string[];
+}
+
+function nameOf(node: TsNode): string {
+  return node.childForFieldName(&#x27;name&#x27;)?.text ?? &#x27;&#x27;;
+}
+
+function indentation(node: TsNode): string {
+  return &#x27; &#x27;.repeat(node.startPosition.column);
+}
+
+function ensureColon(text: string): string {
+  const trimmed = text.trimEnd();</pre></section><section class="page"><div class="number">2 / 14</div><pre>  if (trimmed.endsWith(&#x27;:&#x27;) || trimmed.endsWith(&#x27;:&#x27;)) return `${trimmed} ...`;
+  return `${trimmed}: ...`;
+}
+
+function pythonSignature(node: TsNode, source: string): string {
+  const body = node.childForFieldName(&#x27;body&#x27;);
+  if (!body) return source.slice(node.startIndex, node.endIndex).trimEnd();
+  const signature = source.slice(node.startIndex, body.startIndex).trimEnd();
+  return ensureColon(signature);
+}
+
+function pythonDecorated(node: TsNode, source: string, classes: string[], functions: string[]): string[] {
+  const indent = indentation(node);
+  const lines: string[] = [];
+  let definition: TsNode | null = null;
+
+  for (const child of node.namedChildren) {
+    if (child.type === &#x27;decorator&#x27;) {
+      lines.push(`${indent}${child.text.trimEnd()}`);
+    } else if (child.type === &#x27;function_definition&#x27; || child.type === &#x27;class_definition&#x27;) {
+      definition = child;
+    }
+  }
+
+  if (!definition) return lines;
+  if (definition.type === &#x27;function_definition&#x27;) {
+    const name = nameOf(definition);
+    if (name) functions.push(name);
+    lines.push(`${indent}${pythonSignature(definition, source)}`);
+  } else {
+    const rendered = pythonClass(definition, source, classes, functions);
+    lines.push(...rendered);
+  }
+  return lines;
+}
+
+function pythonClass(node: TsNode, source: string, classes: string[], functions: string[]): string[] {
+  const name = nameOf(node);
+  if (name) classes.push(name);
+
+  const body = node.childForFieldName(&#x27;body&#x27;);
+  if (!body) return [source.slice(node.startIndex, node.endIndex).trimEnd()];
+
+  const header = source.slice(node.startIndex, body.startIndex).trimEnd();
+  const lines: string[] = [header];
+
+  for (const child of body.namedChildren) {
+    if (child.type === &#x27;function_definition&#x27;) {
+      const method = nameOf(child);
+      if (method) functions.push(method);
+      lines.push(&#x27;&#x27;);
+      lines.push(`${indentation(child)}${pythonSignature(child, source)}`);
+      continue;
+    }
+    if (child.type === &#x27;decorated_definition&#x27;) {
+      lines.push(&#x27;&#x27;);
+      lines.push(...pythonDecorated(child, source, classes, functions));
+      continue;
+    }
+    if (child.type === &#x27;expression_statement&#x27;) {
+      const assignment = child.namedChildren[0];
+      const left = assignment?.namedChildren[0];
+      const leftName = left?.text.trim() ?? &#x27;&#x27;;
+      const keepsConstant = /^[A-Z_][A-Z0-9_]*$/.test(leftName)
+        || (assignment?.type === &#x27;assignment&#x27; &amp;&amp; child.text.includes(&#x27;:&#x27;));
+      if (keepsConstant) lines.push(`${indentation(child)}${child.text.trimEnd()}`);</pre></section><section class="page"><div class="number">3 / 14</div><pre>    }
+  }
+
+  return lines;
+}
+
+function pythonContract(source: string, parser: TsParser, language: unknown): TreeSitterContract {
+  parser.setLanguage(language);
+  const root = parser.parse(source).rootNode;
+  const classes: string[] = [];
+  const functions: string[] = [];
+  const lines: string[] = [];
+
+  for (const node of root.namedChildren) {
+    switch (node.type) {
+      case &#x27;import_statement&#x27;:
+      case &#x27;import_from_statement&#x27;:
+      case &#x27;future_import_statement&#x27;:
+        lines.push(node.text.trimEnd());
+        break;
+
+      case &#x27;function_definition&#x27;: {
+        const name = nameOf(node);
+        if (name) functions.push(name);
+        lines.push(&#x27;&#x27;);
+        lines.push(pythonSignature(node, source));
+        break;
+      }
+
+      case &#x27;decorated_definition&#x27;:
+        lines.push(&#x27;&#x27;);
+        lines.push(...pythonDecorated(node, source, classes, functions));
+        break;
+
+      case &#x27;class_definition&#x27;:
+        lines.push(&#x27;&#x27;);
+        lines.push(...pythonClass(node, source, classes, functions));
+        break;
+
+      case &#x27;expression_statement&#x27;: {
+        const assignment = node.namedChildren[0];
+        const left = assignment?.namedChildren[0];
+        const leftName = left?.text.trim() ?? &#x27;&#x27;;
+        const keepsConstant = /^[A-Z_][A-Z0-9_]*$/.test(leftName)
+          || (assignment?.type === &#x27;assignment&#x27; &amp;&amp; node.text.includes(&#x27;:&#x27;));
+        if (keepsConstant) lines.push(node.text.trimEnd());
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  return {
+    content: lines.join(&#x27;\n&#x27;).replace(/\n{3,}/g, &#x27;\n\n&#x27;).trim(),
+    language: &#x27;python&#x27;,
+    classes: Array.from(new Set(classes)),
+    functions: Array.from(new Set(functions)),
+  };
+}
+
+function tsSignature(node: TsNode, source: string): string {
+  const body = node.childForFieldName(&#x27;body&#x27;);
+  if (!body) return source.slice(node.startIndex, node.endIndex).trimEnd();
+  const signature = source.slice(node.startIndex, body.startIndex).trimEnd();
+  return `${signature} { ... }`;
+}</pre></section><section class="page"><div class="number">4 / 14</div><pre>
+function tsClass(node: TsNode, source: string, classes: string[], functions: string[]): string[] {
+  const className = nameOf(node);
+  if (className) classes.push(className);
+
+  const body = node.childForFieldName(&#x27;body&#x27;);
+  if (!body) return [source.slice(node.startIndex, node.endIndex).trimEnd()];
+
+  const header = source.slice(node.startIndex, body.startIndex).trimEnd();
+  const lines: string[] = [`${header} {`];
+
+  for (const member of body.namedChildren) {
+    switch (member.type) {
+      case &#x27;method_definition&#x27;: {
+        const method = nameOf(member);
+        if (method) functions.push(method);
+        lines.push(`${indentation(member)}${tsSignature(member, source)}`);
+        break;
+      }
+      case &#x27;public_field_definition&#x27;:
+      case &#x27;property_signature&#x27;:
+      case &#x27;method_signature&#x27;:
+      case &#x27;abstract_method_signature&#x27;:
+      case &#x27;index_signature&#x27;:
+        lines.push(`${indentation(member)}${member.text.trimEnd()}`);
+        break;
+      default:
+        break;
+    }
+  }
+
+  lines.push(&#x27;}&#x27;);
+  return lines;
+}
+
+function findArrow(node: TsNode): TsNode | null {
+  if (node.type === &#x27;arrow_function&#x27;) return node;
+  for (const child of node.namedChildren) {
+    const found = findArrow(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+function tsVariable(node: TsNode, source: string, functions: string[]): string | null {
+  const arrow = findArrow(node);
+  if (arrow) {
+    const name = node.namedChildren[0]?.namedChildren[0]?.text ?? &#x27;&#x27;;
+    if (name) functions.push(name);
+    const body = arrow.childForFieldName(&#x27;body&#x27;);
+    if (body) {
+      const signature = source.slice(node.startIndex, body.startIndex).trimEnd();
+      return `${signature} ...`;
+    }
+  }
+  const text = node.text.trimEnd();
+  return text.includes(&#x27;function&#x27;) || text.includes(&#x27;=&gt;&#x27;) || text.length &lt; 240 ? text : null;
+}
+
+function tsDeclaration(
+  node: TsNode,
+  source: string,
+  classes: string[],
+  functions: string[]
+): string[] {
+  switch (node.type) {
+    case &#x27;class_declaration&#x27;:
+      return tsClass(node, source, classes, functions);</pre></section><section class="page"><div class="number">5 / 14</div><pre>
+    case &#x27;function_declaration&#x27;: {
+      const name = nameOf(node);
+      if (name) functions.push(name);
+      return [tsSignature(node, source)];
+    }
+
+    case &#x27;interface_declaration&#x27;:
+    case &#x27;type_alias_declaration&#x27;:
+    case &#x27;enum_declaration&#x27;:
+    case &#x27;ambient_declaration&#x27;:
+    case &#x27;module&#x27;:
+      return node.text.trimEnd().split(&#x27;\n&#x27;);
+
+    case &#x27;lexical_declaration&#x27;:
+    case &#x27;variable_declaration&#x27;: {
+      const rendered = tsVariable(node, source, functions);
+      return rendered ? rendered.split(&#x27;\n&#x27;) : [];
+    }
+
+    default:
+      return [];
+  }
+}
+
+function tsContract(
+  source: string,
+  parser: TsParser,
+  language: unknown,
+  label: string
+): TreeSitterContract {
+  parser.setLanguage(language);
+  const root = parser.parse(source).rootNode;
+  const classes: string[] = [];
+  const functions: string[] = [];
+  const lines: string[] = [];
+
+  for (const node of root.namedChildren) {
+    if (node.type === &#x27;import_statement&#x27; || node.type === &#x27;import_alias&#x27;) {
+      lines.push(node.text.trimEnd());
+      continue;
+    }
+
+    if (node.type === &#x27;export_statement&#x27;) {
+      const declaration = node.namedChildren.find((child) =&gt;
+        [
+          &#x27;class_declaration&#x27;,
+          &#x27;function_declaration&#x27;,
+          &#x27;interface_declaration&#x27;,
+          &#x27;type_alias_declaration&#x27;,
+          &#x27;enum_declaration&#x27;,
+          &#x27;lexical_declaration&#x27;,
+          &#x27;variable_declaration&#x27;,
+          &#x27;ambient_declaration&#x27;,
+        ].includes(child.type)
+      );
+      if (!declaration) {
+        lines.push(node.text.trimEnd());
+        continue;
+      }
+      const prefix = source.slice(node.startIndex, declaration.startIndex);
+      const rendered = tsDeclaration(declaration, source, classes, functions);
+      if (rendered.length &gt; 0) lines.push(`${prefix}${rendered[0]}`, ...rendered.slice(1));
+      continue;
+    }
+
+    const rendered = tsDeclaration(node, source, classes, functions);
+    lines.push(...rendered);</pre></section><section class="page"><div class="number">6 / 14</div><pre>  }
+
+  return {
+    content: lines.join(&#x27;\n&#x27;).replace(/\n{3,}/g, &#x27;\n\n&#x27;).trim(),
+    language: label,
+    classes: Array.from(new Set(classes)),
+    functions: Array.from(new Set(functions)),
+  };
+}
+
+export function treeSitterContract(
+  absPath: string,
+  source: string
+): TreeSitterContract | null {
+  const loaded = loadGrammars();
+  if (!loaded) return null;
+
+  const ext = path.extname(absPath).toLowerCase();
+  const parser = new loaded.Parser();
+
+  try {
+    if (ext === &#x27;.py&#x27;) {
+      const contract = pythonContract(source, parser, loaded.Python);
+      return contract.content.length &gt;= 40 ? contract : null;
+    }
+
+    if (ext === &#x27;.ts&#x27; || ext === &#x27;.mts&#x27; || ext === &#x27;.cts&#x27;) {
+      const contract = tsContract(source, parser, loaded.TypeScript.typescript, &#x27;typescript&#x27;);
+      return contract.content.length &gt;= 40 ? contract : null;
+    }
+
+    if (ext === &#x27;.tsx&#x27;) {
+      const contract = tsContract(source, parser, loaded.TypeScript.tsx, &#x27;tsx&#x27;);
+      return contract.content.length &gt;= 40 ? contract : null;
+    }
+
+    if (ext === &#x27;.js&#x27; || ext === &#x27;.jsx&#x27; || ext === &#x27;.mjs&#x27; || ext === &#x27;.cjs&#x27;) {
+      const contract = tsContract(source, parser, loaded.TypeScript.tsx, ext.slice(1));
+      return contract.content.length &gt;= 40 ? contract : null;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+## DAG scheduling
+
+packages/cli/src/dag/engine.ts
+
+import { EventEmitter } from &#x27;events&#x27;;
+import type { DagNode, DagNodeExecutor, DagEvent, DagToolBridge } from &#x27;./types.js&#x27;;
+import type { DagNodeStatus } from &#x27;../protocol/types.js&#x27;;
+export interface DagRunOptions {
+    maxParallel: number;
+    maxAttemptsPerNode: number;
+    signal: AbortSignal;
+}
+const snapshot = (node: DagNode): DagNode =&gt; ({ ...node, dependsOn: [...node.dependsOn] });
+const succeeded = (status: DagNodeStatus) =&gt; status === &#x27;complete&#x27; || status === &#x27;repaired&#x27;;
+export class DagEngine extends EventEmitter {
+    private readonly nodes = new Map&lt;string, DagNode&gt;();
+    private running = false;
+    executor: DagNodeExecutor = async () =&gt; { throw new Error(&#x27;No DAG executor configured&#x27;); };
+    constructor(nodes: DagNode[] = [], public goal = &#x27;&#x27;) {
+        super();
+        for (const node of nodes) {</pre></section><section class="page"><div class="number">7 / 14</div><pre>            if (this.nodes.has(node.id))
+                throw new Error(`Duplicate DAG node: ${node.id}`);
+            this.nodes.set(node.id, snapshot(node));
+        }
+        const visiting = new Set&lt;string&gt;();
+        const visited = new Set&lt;string&gt;();
+        const visit = (id: string) =&gt; {
+            if (visiting.has(id))
+                throw new Error(`DAG cycle at ${id}`);
+            if (visited.has(id))
+                return;
+            const node = this.nodes.get(id);
+            if (!node)
+                throw new Error(`Missing DAG dependency: ${id}`);
+            visiting.add(id);
+            node.dependsOn.forEach(visit);
+            visiting.delete(id);
+            visited.add(id);
+        };
+        this.nodes.forEach(node =&gt; visit(node.id));
+    }
+    emitEvent(event: DagEvent): void { this.emit(&#x27;event&#x27;, event); }
+    private update(node: DagNode, status: DagNodeStatus, result?: string): void {
+        node.status = status;
+        if (result !== undefined)
+            node.result = result;
+        this.emitEvent({ type: status === &#x27;failed&#x27; ? &#x27;node-failed&#x27; : &#x27;node-updated&#x27;, nodeId: node.id, node: snapshot(node) });
+    }
+    get allNodes(): DagNode[] { return [...this.nodes.values()].map(snapshot); }
+    node(id: string): DagNode | null { const node = this.nodes.get(id); return node ? snapshot(node) : null; }
+    toolBridge(): DagToolBridge {
+        return {
+            setNodeStatus: (id, status, result, byAgent) =&gt; {
+                const node = this.nodes.get(id);
+                if (!node)
+                    return false;
+                // Agent reports cannot bypass execution or complete another task.
+                if (byAgent) {
+                    if (node.status !== &#x27;running&#x27; || (node.agent &amp;&amp; node.agent !== byAgent))
+                        return false;
+                    if (result !== undefined)
+                        node.result = result;
+                    this.emitEvent({ type: &#x27;node-updated&#x27;, nodeId: id, node: snapshot(node) });
+                    return true;
+                }
+                if (this.running &amp;&amp; node.status === &#x27;running&#x27;)
+                    return false;
+                this.update(node, status, result);
+                return true;
+            },
+            addNode: (node, byAgent) =&gt; {
+                if (!node.id.trim() || this.nodes.has(node.id) || node.dependsOn.some(id =&gt; !this.nodes.has(id)))
+                    return false;
+                const added: DagNode = { ...node, dependsOn: [...node.dependsOn], status: &#x27;pending&#x27;, attempts: 0, byAgent };
+                this.nodes.set(node.id, added);
+                this.emitEvent({ type: &#x27;node-updated&#x27;, nodeId: node.id, node: snapshot(added) });
+                return true;
+            },
+            snapshot: () =&gt; this.allNodes, goal: () =&gt; this.goal,
+        };
+    }
+    async run(options: DagRunOptions): Promise&lt;{
+        ok: boolean;
+        summary: string;</pre></section><section class="page"><div class="number">8 / 14</div><pre>    }&gt; {
+        if (this.running)
+            throw new Error(&#x27;DAG is already running&#x27;);
+        if (!Number.isInteger(options.maxParallel) || options.maxParallel &lt; 1 || !Number.isInteger(options.maxAttemptsPerNode) || options.maxAttemptsPerNode &lt; 1)
+            throw new Error(&#x27;DAG limits must be positive integers&#x27;);
+        this.running = true;
+        const inFlight = new Map&lt;string, Promise&lt;void&gt;&gt;();
+        try {
+            while (!options.signal.aborted) {
+                for (const node of this.nodes.values()) {
+                    if (inFlight.size &gt;= options.maxParallel)
+                        break;
+                    if (node.status !== &#x27;pending&#x27; &amp;&amp; node.status !== &#x27;blocked&#x27;)
+                        continue;
+                    if (node.dependsOn.some(id =&gt; !succeeded(this.nodes.get(id)!.status) || inFlight.has(id))) {
+                        if (node.status !== &#x27;blocked&#x27;)
+                            this.update(node, &#x27;blocked&#x27;);
+                        continue;
+                    }
+                    node.attempts++;
+                    this.update(node, &#x27;running&#x27;);
+                    const job = this.execute(node, options).finally(() =&gt; inFlight.delete(node.id));
+                    inFlight.set(node.id, job);
+                }
+                if (!inFlight.size)
+                    break;
+                await Promise.race(inFlight.values());
+            }
+            // Do not return while a cancelled executor can still write to the workspace.
+            await Promise.allSettled(inFlight.values());
+            for (const node of this.nodes.values()) {
+                if (node.status === &#x27;pending&#x27; || node.status === &#x27;blocked&#x27; || node.status === &#x27;running&#x27;)
+                    this.update(node, &#x27;skipped&#x27;);
+            }
+            const nodes = this.allNodes;
+            const done = nodes.filter(n =&gt; succeeded(n.status)).length;
+            const ok = nodes.length &gt; 0 &amp;&amp; done === nodes.length &amp;&amp; !options.signal.aborted;
+            const summary = ok ? `DAG complete: ${done} done` : `DAG incomplete: ${done} done, ${nodes.filter(n =&gt; n.status === &#x27;failed&#x27;).length} failed, ${nodes.filter(n =&gt; n.status === &#x27;skipped&#x27;).length} skipped${options.signal.aborted ? &#x27; (cancelled)&#x27; : &#x27;&#x27;}`;
+            this.emitEvent({ type: &#x27;finished&#x27; });
+            return { ok, summary };
+        }
+        finally {
+            this.running = false;
+        }
+    }
+    private async execute(node: DagNode, options: DagRunOptions): Promise&lt;void&gt; {
+        try {
+            const outcome = await this.executor(snapshot(node), { signal: options.signal, readyDeps: node.dependsOn.map(id =&gt; snapshot(this.nodes.get(id)!)) });
+            if (options.signal.aborted)
+                this.update(node, &#x27;skipped&#x27;);
+            else if (outcome.ok)
+                this.update(node, &#x27;complete&#x27;, outcome.result);
+            else
+                this.failed(node, outcome.result, options.maxAttemptsPerNode);
+        }
+        catch (error) {
+            if (options.signal.aborted)
+                this.update(node, &#x27;skipped&#x27;);
+            else
+                this.failed(node, (error as Error).message, options.maxAttemptsPerNode);
+        }
+    }</pre></section><section class="page"><div class="number">9 / 14</div><pre>    private failed(node: DagNode, result: string, maxAttempts: number): void {
+        this.update(node, &#x27;failed&#x27;, result);
+        if (node.attempts &lt; maxAttempts)
+            this.update(node, &#x27;pending&#x27;);
+    }
+}
+
+## Token minimization
+
+packages/cli/src/tokens/budget.ts
+
+import type { ProviderMessage } from &#x27;../providers/types.js&#x27;;
+import type { LlmRequest } from &#x27;../providers/types.js&#x27;;
+import { estimateTokens } from &#x27;./estimator.js&#x27;;
+/** Best-effort reservation; provider tokenization and proxy output limits can differ. */
+export function reserveTaskTokens(request: LlmRequest, remaining: number): boolean {
+    const input = Math.ceil(estimateTokens(JSON.stringify({ system: request.system, messages: request.messages, tools: request.tools })) * 1.25);
+    const output = Math.min(request.maxTokens ?? 2200, remaining - input);
+    if (output &lt; 128) return false;
+    request.maxTokens = output;
+    return true;
+}
+const size = (value: unknown) =&gt; JSON.stringify(value).length;
+function shorten(text: string, limit: number): string {
+    if (text.length &lt;= limit)
+        return text;
+    const marker = &#x27;\n[context truncated to fit budget]\n&#x27;;
+    if (limit &lt;= marker.length)
+        return marker.slice(0, limit);
+    const head = Math.ceil((limit - marker.length) * 0.6);
+    return text.slice(0, head) + marker + text.slice(-(limit - marker.length - head));
+}
+/** Bound history without separating native calls from their result messages. */
+export function budgetMessages(messages: ProviderMessage[], charBudget: number): ProviderMessage[] {
+    if (charBudget &lt; 128)
+        throw new Error(&#x27;Tool schemas and instructions exceed contextCharBudget; increase the configured budget&#x27;);
+    if (!messages.length)
+        return [];
+    if (size(messages) &lt;= charBudget)
+        return messages.map(message =&gt; ({ ...message }));
+    const pinned = { ...messages[0], content: shorten(messages[0].content, Math.floor(charBudget / 3)) };
+    const groups: ProviderMessage[][] = [];
+    for (const message of messages.slice(1)) {
+        if (message.role === &#x27;tool&#x27; &amp;&amp; groups.length)
+            groups[groups.length - 1].push({ ...message });
+        else
+            groups.push([{ ...message }]);
+    }
+    const tail: ProviderMessage[][] = [];
+    let remaining = charBudget - size([pinned]) - 2;
+    for (let index = groups.length - 1; index &gt;= 0; index--) {
+        const group = groups[index];
+        if (size(group) &gt; remaining) {
+            const fixed = size(group.map(message =&gt; ({ ...message, content: &#x27;&#x27; })));
+            const allowance = remaining - fixed - 16;
+            if (allowance &lt; 0) {
+                if (index === groups.length - 1 || group.some(message =&gt; message.toolCalls?.length) &amp;&amp; !tail.some(g =&gt; g.some(m =&gt; m.role === &#x27;tool&#x27;)))
+                    throw new Error(&#x27;Latest tool transaction exceeds contextCharBudget; increase the budget&#x27;);
+                break;
+            }
+            const each = Math.floor(allowance / group.length);
+            for (const message of group)
+                message.content = shorten(message.content, each);</pre></section><section class="page"><div class="number">10 / 14</div><pre>        }
+        if (size(group) &gt; remaining)
+            break;
+        tail.unshift(group);
+        remaining -= size(group) + 1;
+    }
+    return [pinned, ...tail.flat()];
+}
+
+packages/cli/src/tokens/estimator.ts
+
+// ─── Token estimation + budgets ─────────────────────────────────────────────
+// Single source of truth for char-&gt;token math. Prefer real provider usage
+// (LlmUsage) whenever reported; estimates are the floor, never celebrated.
+export function estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
+}
+export interface ToolBudget {
+    /** hard cap in chars for any tool output fed to the model */
+    charCap: number;
+    /** keep this many leading lines before elision marker */
+    headLines: number;
+    /** keep this many trailing lines */
+    tailLines: number;
+}
+export const DEFAULT_TOOL_BUDGET: ToolBudget = { charCap: 8000, headLines: 12, tailLines: 8 };
+/** Trim a tool result with head/tail preservation and a mid-marker. */
+export function truncateOutput(output: string, budget: ToolBudget = DEFAULT_TOOL_BUDGET): {
+    text: string;
+    truncated: boolean;
+    totalLines: number;
+} {
+    const lines = output.split(&#x27;\n&#x27;);
+    const totalLines = lines.length;
+    if (output.length &lt;= budget.charCap)
+        return { text: output, truncated: false, totalLines };
+    const marker = `\n[… output truncated; ${totalLines} lines, ~${estimateTokens(output)} tokens total …]\n`;
+    const cap = Math.max(0, budget.charCap);
+    if (cap &lt;= marker.length)
+        return { text: marker.slice(0, cap), truncated: true, totalLines };
+    const available = cap - marker.length;
+    const headCap = Math.ceil(available * 0.6);
+    const tailCap = available - headCap;
+    const head = lines.slice(0, budget.headLines).join(&#x27;\n&#x27;).slice(0, headCap);
+    const tail = tailCap ? lines.slice(-budget.tailLines).join(&#x27;\n&#x27;).slice(-tailCap) : &#x27;&#x27;;
+    return { text: head + marker + tail, truncated: true, totalLines };
+}
+function omitMarker(omitted: number, chars: number): string {
+    return `[… ${omitted} lines elided (~${tokensShorthand(chars)})]`;
+}
+function tokensShorthand(chars: number): string {
+    const t = Math.max(1, Math.round(chars / 4));
+    return t &gt;= 1000 ? `${Math.round(t / 100) / 10}k tokens` : `${t} tokens`;
+}
+export type UsageKind = &#x27;turn&#x27; | &#x27;tool&#x27; | &#x27;compaction&#x27;;
+export interface UsageRecord {
+    kind: UsageKind;
+    input: number;
+    output: number;
+    at: number;
+}
+/** Usage ledger: real numbers first; estimates flagged so dashboards never lie. */
+export class UsageLedger {
+    private readonly real: Array&lt;{
+        record: UsageRecord;
+        estimated: boolean;
+    }&gt; = [];</pre></section><section class="page"><div class="number">11 / 14</div><pre>    private cachedIsh = 0;
+    addRecord(kind: UsageKind, input: number, output: number, estimatedFallback = false): void {
+        this.real.push({ record: { kind, input, output, at: Date.now() }, estimated: estimatedFallback });
+    }
+    /** Return totals, including a `estimatedRatio` so callers can show confidence. */
+    totals(): {
+        input: number;
+        output: number;
+        total: number;
+        estimated: boolean;
+        recent: UsageRecord[];
+    } {
+        let input = 0;
+        let output = 0;
+        let estimated = false;
+        for (const { record, estimated: wasEstimate } of this.real) {
+            input += record.input;
+            output += record.output;
+            if (wasEstimate)
+                estimated = true;
+        }
+        return { input, output, total: input + output, estimated, recent: this.real.slice(-20).map(({ record }) =&gt; record) };
+    }
+    setCacheHint(tokens: number): void {
+        this.cachedIsh = tokens;
+    }
+    get cacheHint(): number {
+        return this.cachedIsh;
+    }
+}
+
+packages/cli/src/tokens/tool-exposure.ts
+
+import type {Tool} from &#x27;../tools/types.js&#x27;;
+const deferred=new WeakSet&lt;Tool&gt;();
+const discovered=new WeakMap&lt;Tool,number&gt;();
+let sequence=0;
+/** MAD-specific on-demand schema budgeting; runtime tools remain registered. */
+export function registerExposure(tool:Tool):void {if(tool.spec.exposure===&#x27;deferred&#x27;)deferred.add(tool);}
+export function exposeTool(tool:Tool):void {
+    if(!deferred.has(tool))return;
+    discovered.set(tool,++sequence);
+    tool.spec={...tool.spec,exposure:&#x27;direct&#x27;};
+}
+export function visibleTools(tools:Tool[],maxDiscovered=5,charBudget=6000):Tool[] {
+    const direct=tools.filter(tool=&gt;!deferred.has(tool)&amp;&amp;tool.spec.exposure===&#x27;direct&#x27;);
+    const candidates=tools.filter(tool=&gt;deferred.has(tool)&amp;&amp;discovered.has(tool)).sort((a,b)=&gt;discovered.get(b)!-discovered.get(a)!);
+    let chars=0;const selected:Tool[]=[];
+    for(const tool of candidates) {
+        if(selected.length&gt;=maxDiscovered)break;
+        const size=JSON.stringify(tool.spec.parameters).length+tool.spec.name.length+tool.spec.description.length;
+        if(selected.length&amp;&amp;chars+size&gt;charBudget)continue;
+        selected.push(tool);chars+=size;
+    }
+    return [...direct,...selected];
+}
+export function resetExposure(tools:Tool[]):void {
+    for(const tool of tools)if(deferred.has(tool)){discovered.delete(tool);tool.spec={...tool.spec,exposure:&#x27;deferred&#x27;};}
+}
+export function undiscoveredTools(tools:Tool[]):Tool[] {
+    const visible=new Set(visibleTools(tools));
+    return tools.filter(tool=&gt;deferred.has(tool)&amp;&amp;!visible.has(tool));</pre></section><section class="page"><div class="number">12 / 14</div><pre>}
+
+## Tool calling
+
+packages/cli/src/agent/step.ts
+
+import {randomUUID} from &#x27;crypto&#x27;;
+import type {Event} from &#x27;../protocol/types.js&#x27;;
+import type {LlmRequest,LlmResult,ProviderClient} from &#x27;../providers/types.js&#x27;;
+import {assistantTextStream} from &#x27;../providers/text-stream.js&#x27;;
+import {estimateTokens} from &#x27;../tokens/estimator.js&#x27;;
+import {parseAgentReply} from &#x27;./protocol.js&#x27;;
+
+/** Shared sampling boundary for foreground turns and named/DAG workers. */
+export async function sampleStep(options:{client:ProviderClient;request:LlmRequest;emit:(event:Event)=&gt;void;streamId?:string;agent?:string}):Promise&lt;LlmResult&gt; {
+    const streamId=options.streamId??randomUUID();
+    const publish=(text:string|null)=&gt;options.emit({kind:&#x27;delta&#x27;,text,streamId,...(options.agent?{toolLabel:options.agent}:{})});
+    publish(null);
+    const reveal=assistantTextStream(publish);
+    let result:LlmResult;
+    try { result=await options.client.stream(options.request,text=&gt;{if(text)reveal(text);}); }
+    catch (error) {
+        if (!options.request.signal?.aborted &amp;&amp; (error as Error).name === &#x27;TimeoutError&#x27;)
+            throw new Error(`${options.client.name} model ${options.client.defaultModel()} timed out. Try another model or provider.`);
+        throw error;
+    }
+    options.request.signal?.throwIfAborted();
+    if(!result.toolCalls.length) {
+        const reply=parseAgentReply(result.text);
+        if(reply.kind===&#x27;action&#x27;&amp;&amp;reply.action)result.toolCalls=[{id:randomUUID(),name:reply.action.tool,args:JSON.stringify(reply.action.args)}];
+    }
+    if(!result.usage)result.usage={input:estimateTokens(JSON.stringify({system:options.request.system,messages:options.request.messages,tools:options.request.tools})),output:estimateTokens(result.text),estimated:true};
+    return result;
+}
+
+packages/cli/src/tools/registry.ts
+
+// ─── Tool registry: name -&gt; runtime + spec + exposure ───────────────────────
+import type { ToolSpec, ResponseItem } from &#x27;../protocol/types.js&#x27;;
+import type { Tool, ToolContext, ToolResult } from &#x27;./types.js&#x27;;
+import { withWorkspaceLock } from &#x27;./lock.js&#x27;;
+import { validateArguments } from &#x27;./validate.js&#x27;;
+import {registerExposure,exposeTool,visibleTools,resetExposure,undiscoveredTools} from &#x27;../tokens/tool-exposure.js&#x27;;
+import { ToolError } from &#x27;./types.js&#x27;;
+export class ToolRegistry {
+    private readonly tools = new Map&lt;string, Tool&gt;();
+    register(command: Tool): void {
+        if (this.tools.has(command.spec.name)) {
+            throw new Error(`Tool already registered: ${command.spec.name}`);
+        }
+        registerExposure(command);
+        this.tools.set(command.spec.name, command);
+    }
+    get(name: string): Tool | null {
+        return this.tools.get(name) ?? null;
+    }
+    has(name: string): boolean {
+        return this.tools.has(name);
+    }
+    /** Direct-exposure specs (fed to the model). */
+    listDirect(): ToolSpec[] {</pre></section><section class="page"><div class="number">13 / 14</div><pre>        return visibleTools([...this.tools.values()]).map(tool=&gt;tool.spec);
+    }
+    /** All specs incl. deferred (used by tool search). */
+    listAll(): ToolSpec[] {
+        return Array.from(this.tools.values()).map((tool) =&gt; tool.spec);
+    }
+    /** Deferred only — surfaced through tool_search to save prompt tokens. */
+    listDeferred(): ToolSpec[] {
+        return undiscoveredTools([...this.tools.values()]).map(tool=&gt;tool.spec);
+    }
+    listTools(): Tool[] { return [...this.tools.values()]; }
+    expose(name: string): void {
+        const tool = this.tools.get(name);
+        if(tool)exposeTool(tool);
+    }
+    resetDiscovery():void {resetExposure([...this.tools.values()]);}
+    names(): string[] {
+        return Array.from(this.tools.keys());
+    }
+    async execute(name: string, args: unknown, ctx: ToolContext): Promise&lt;ToolResult&gt; {
+        const tool = this.tools.get(name);
+        if (!tool)
+            return { ok: false, output: `Unknown tool: ${name}` };
+        if (ctx.signal.aborted)
+            return { ok: false, output: &#x27;Cancelled&#x27; };
+        const validation = validateArguments(args, tool.spec.parameters);
+        if (validation)
+            return { ok: false, output: `Invalid arguments: ${validation}` };
+        const isObjectRecord = Boolean(args) &amp;&amp; typeof args === &#x27;object&#x27; &amp;&amp; !Array.isArray(args);
+        const safeArgs = (isObjectRecord ? args : {}) as Record&lt;string, unknown&gt;;
+        ctx.emit({
+            kind: &#x27;tool-started&#x27;,
+            tool: name,
+            brief: describeCall(tool.spec, safeArgs),
+            agent: ctx.agent,
+        });
+        const started = Date.now();
+        try {
+            const result = await (tool.spec.mutates ? withWorkspaceLock(ctx.workspace, ctx.signal, () =&gt; tool.run(safeArgs, ctx)) : tool.run(safeArgs, ctx));
+            ctx.emit({
+                kind: &#x27;tool-completed&#x27;,
+                tool: name,
+                brief: describeCall(tool.spec, safeArgs),
+                ok: result.ok,
+                detail: result.denied ? &#x27;denied&#x27; : undefined,
+                agent: ctx.agent,
+            });
+            void started;
+            return result;
+        }
+        catch (error) {
+            const message = error instanceof ToolError ? error.message : `${(error as Error)?.message ?? String(error)}`;
+            ctx.emit({
+                kind: &#x27;tool-completed&#x27;,
+                tool: name,
+                brief: describeCall(tool.spec, safeArgs),
+                ok: false,
+                detail: message.slice(0, 200),
+                agent: ctx.agent,
+            });
+            return { ok: false, output: `Error: ${message}` };
+        }
+    }
+}
+export function describeCall(spec: ToolSpec, args: Record&lt;string, unknown&gt;): string {
+    const first = spec.parameters.required?.[0] ?? Object.keys(spec.parameters.properties)[0];</pre></section><section class="page"><div class="number">14 / 14</div><pre>    const value = first !== undefined ? String(args[first] ?? &#x27;&#x27;) : &#x27;&#x27;;
+    const secondary = Object.entries(args)
+        .filter(([key]) =&gt; key !== first &amp;&amp; typeof value !== &#x27;undefined&#x27; &amp;&amp; args[key] !== undefined)
+        .slice(0, 1)
+        .map(([key, argValue]) =&gt; `${key}=${String(argValue).slice(0, 40)}`);
+    return [spec.description.split(&#x27;.&#x27;)[0], value.slice(0, 60), ...secondary]
+        .filter(Boolean)
+        .join(&#x27; &#x27;);
+}</pre></section></body></html>
