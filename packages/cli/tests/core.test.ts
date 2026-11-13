@@ -34,6 +34,26 @@ test('DAG rejects missing dependencies, cycles and duplicate IDs', () => {
     assert.throws(() => new DagEngine([node('a', ['b']), node('b', ['a'])]), /cycle/);
     assert.throws(() => new DagEngine([node('a'), node('a')]), /Duplicate/);
 });
+test('DAG computes mathematical topological sort, critical path and graph metrics', () => {
+    const engine = new DagEngine([
+        node('design'),
+        node('backend', ['design']),
+        node('frontend', ['design']),
+        node('integration', ['backend', 'frontend']),
+    ]);
+    const topo = engine.topologicalSort();
+    assert.equal(topo[0], 'design');
+    assert.ok(topo.indexOf('design') < topo.indexOf('backend'));
+    assert.ok(topo.indexOf('design') < topo.indexOf('frontend'));
+    assert.ok(topo.indexOf('backend') < topo.indexOf('integration'));
+    assert.ok(topo.indexOf('frontend') < topo.indexOf('integration'));
+
+    const metrics = engine.graphMetrics();
+    assert.equal(metrics.nodeCount, 4);
+    assert.equal(metrics.edgeCount, 4);
+    assert.equal(metrics.criticalPathLength, 3); // design -> backend/frontend -> integration
+    assert.ok(metrics.theoreticalSpeedup > 1);
+});
 test('aborting an in-flight DAG settles rather than leaving a waiter hanging', async () => {
     const abort = new AbortController();
     const engine = new DagEngine([node('a')]);
@@ -351,13 +371,17 @@ test('MCP spawn failure rejects initialization immediately', async () => {
     }
 });
 test('request budgeting retains native call/result pairs and bounds history', async () => {
-    const { budgetMessages } = await import('../src/tokens/budget.js');
+    const { budgetMessages, computeBudgetMetrics } = await import('../src/tokens/budget.js');
     const messages = [{ role: 'user' as const, content: 'task' }, { role: 'assistant' as const, content: '', toolCalls: [{ id: 'bounded', name: 'read_file', args: '{"path":"a"}' }] }, { role: 'tool' as const, callId: 'bounded', name: 'read_file', content: 'x'.repeat(10000) }, { role: 'user' as const, content: 'Continue.' }];
     const bounded = budgetMessages(messages, 1500);
     assert.ok(JSON.stringify(bounded).length <= 1500);
     assert.equal(bounded[1].toolCalls?.[0].id, 'bounded');
     assert.equal(bounded[2].callId, 'bounded');
     assert.match(bounded[2].content, /truncated/);
+
+    const metrics = computeBudgetMetrics(messages, bounded);
+    assert.ok(metrics.compressionRatio > 0.8);
+    assert.equal(metrics.atomicInvariantsPreserved, true);
 });
 test('compaction retains whole native tool transactions', async () => {
     const { ContextManager } = await import('../src/session/context.js');

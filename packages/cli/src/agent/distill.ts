@@ -11,9 +11,11 @@ export interface DistilledFile {
   originalTokens: number;
   distilledTokens: number;
   savingsPercent: number;
+  compressionRatio: number;
   content: string;
   classes: string[];
   functions: string[];
+  criticalSymbols: string[];
 }
 
 const TOKENS_PER_CHAR = 0.25;
@@ -65,6 +67,11 @@ function finish(
   const savingsPercent = originalTokens > 0
     ? Math.round(((originalTokens - distilledTokens) / originalTokens) * 1000) / 10
     : 0;
+  const compressionRatio = originalTokens > 0
+    ? Math.round((1 - distilledTokens / originalTokens) * 1000) / 1000
+    : 0;
+  const uClasses = unique(classes);
+  const uFunctions = unique(functions);
 
   return {
     file: relativePath,
@@ -75,9 +82,11 @@ function finish(
     originalTokens,
     distilledTokens,
     savingsPercent,
+    compressionRatio,
     content: distilled,
-    classes: unique(classes),
-    functions: unique(functions),
+    classes: uClasses,
+    functions: uFunctions,
+    criticalSymbols: [...uClasses, ...uFunctions],
   };
 }
 
